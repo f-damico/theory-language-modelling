@@ -99,3 +99,6 @@ Epoch :  130 	 train loss: 126902149.9313 ,test loss: 16301322.5938 , test acc.:
 Epoch :  140 	 train loss: 4101138.1940 ,test loss: 1542997.6094 , test acc.: 0.03 , epoch time: 14.282244
 Epoch :  150 	 train loss: 74884602.2062 ,test loss: 6910210.2188 , test acc.: 0.03 , epoch time: 14.274392
 Epoch :  160 	 train loss: 45025007.2156 ,test loss: 236309795.0000 , test acc.: 0.05 , epoch time: 14.265641
+Epoch :  170 	 train loss: 1289616.6650 ,test loss: 282257.3555 , test acc.: 0.03 , epoch time: 14.255416
+Epoch :  180 	 train loss: 20232863.5817 ,test loss: 554206.4648 , test acc.: 0.03 , epoch time: 14.243724
+Epoch :  190 	 train loss: 336337.5139 ,test loss: 96608.3252 , test acc.: 0.05 , epoch time: 14.232887
