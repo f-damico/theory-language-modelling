@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .fcn import MLP
+try:
+    from .fcn import MLP
+except ImportError:
+    from fcn import MLP
 
 class MultiHeadAttention(nn.Module):
     """

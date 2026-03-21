@@ -1,0 +1,115 @@
+#!/bin/bash
+#PBS -N rhm_tr_single
+#PBS -q gpuq-longrun
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l walltime=100:00:00
+#PBS -j oe
+#PBS -o pbs_logs/
+
+set -eo pipefail
+
+REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
+RUN_SCRIPT="${RUN_SCRIPT:-$REPO_DIR/run_rhm_transformer_single.py}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/results/rhm_transformer_single}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-theory-lm}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+# Easy overrides from qsub -v or by editing here
+TRAIN_SIZE="${TRAIN_SIZE:-32768}"
+TEST_SIZE="${TEST_SIZE:-32768}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
+MAX_EPOCHS="${MAX_EPOCHS:-300}"
+SEED_RULES="${SEED_RULES:-0}"
+SEED_SAMPLE="${SEED_SAMPLE:-0}"
+SEED_MODEL="${SEED_MODEL:-0}"
+DEVICE="${DEVICE:-cuda}"
+TAG="${TAG:-paper_L3_s2_v32_m8}"
+
+JOB_ID="${PBS_JOBID:-no_jobid}"
+HOSTNAME_NOW="$(hostname)"
+START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+ARRAY_LOG="$REPO_DIR/pbs_logs/job_${JOB_ID}_${TAG}_P${TRAIN_SIZE}.log"
+
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$REPO_DIR/pbs_logs"
+cd "$REPO_DIR"
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export MKL_INTERFACE_LAYER="${MKL_INTERFACE_LAYER:-GNU}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+
+if command -v module >/dev/null 2>&1; then
+    module purge || true
+    # Example:
+    # module load cuda/12.1
+    # module load anaconda3
+fi
+
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+else
+    source activate "$CONDA_ENV_NAME"
+fi
+
+set -u
+
+{
+    echo "[START] $START_TS"
+    echo "[INFO] hostname=$HOSTNAME_NOW"
+    echo "[INFO] repo_dir=$REPO_DIR"
+    echo "[INFO] run_script=$RUN_SCRIPT"
+    echo "[INFO] output_dir=$OUTPUT_DIR"
+    echo "[INFO] train_size=$TRAIN_SIZE"
+    echo "[INFO] test_size=$TEST_SIZE"
+    echo "[INFO] batch_size=$BATCH_SIZE"
+    echo "[INFO] max_epochs=$MAX_EPOCHS"
+    echo "[INFO] seed_rules=$SEED_RULES"
+    echo "[INFO] seed_sample=$SEED_SAMPLE"
+    echo "[INFO] seed_model=$SEED_MODEL"
+    echo "[INFO] device=$DEVICE"
+    echo "[INFO] conda_env_name=$CONDA_ENV_NAME"
+    echo "[INFO] python_bin=$PYTHON_BIN"
+    echo "[INFO] which_python=$(command -v "$PYTHON_BIN" || true)"
+    echo "[INFO] python_version=$($PYTHON_BIN --version 2>&1 || true)"
+    echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "[INFO] nvidia-smi:"
+        nvidia-smi || true
+    fi
+} | tee -a "$ARRAY_LOG"
+
+if [ ! -f "$RUN_SCRIPT" ]; then
+    echo "[ERROR] Missing run script: $RUN_SCRIPT" | tee -a "$ARRAY_LOG"
+    exit 1
+fi
+
+CMD=(
+    "$PYTHON_BIN" -u "$RUN_SCRIPT"
+    --repo_dir "$REPO_DIR"
+    --output_dir "$OUTPUT_DIR"
+    --python_bin "$PYTHON_BIN"
+    --device "$DEVICE"
+    --train_size "$TRAIN_SIZE"
+    --test_size "$TEST_SIZE"
+    --batch_size "$BATCH_SIZE"
+    --max_epochs "$MAX_EPOCHS"
+    --seed_rules "$SEED_RULES"
+    --seed_sample "$SEED_SAMPLE"
+    --seed_model "$SEED_MODEL"
+    --tag "$TAG"
+)
+
+{
+    echo "[CMD] ${CMD[*]}"
+    echo "[RUN] launching single RHM transformer training"
+} | tee -a "$ARRAY_LOG"
+
+"${CMD[@]}" 2>&1 | tee -a "$ARRAY_LOG"
+RET=$?
+
+END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+echo "[END] $END_TS return_code=$RET" | tee -a "$ARRAY_LOG"
+
+exit $RET

@@ -1,0 +1,42 @@
+name: theory-lm
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # Prefer OpenBLAS to avoid MKL activation issues on clusters with 'set -u'
+  - libblas=*=*openblas
+
+  # Core numerical stack
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - tqdm
+
+  # PyTorch stack pinned to a CUDA runtime compatible with older 470-series drivers
+  - pytorch=1.12.1
+  - torchvision=0.13.1
+  - torchaudio=0.12.1
+  - cudatoolkit=11.3
+
+  # Notebook / interactive work
+  - jupyterlab
+  - notebook
+  - ipykernel
+
+  # Common utilities
+  - pyyaml
+  - h5py
+  - einops
+  - psutil
+  - tabulate
+
+  - pip:
+      - rich

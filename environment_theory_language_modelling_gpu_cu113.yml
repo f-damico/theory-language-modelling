@@ -1,0 +1,34 @@
+name: theory-lm
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # Prefer OpenBLAS to avoid MKL activation issues on clusters with 'set -u'
+  - libblas=*=*openblas
+
+  # Core numerical stack
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - tqdm
+
+  # Notebook / interactive work
+  - jupyterlab
+  - notebook
+  - ipykernel
+
+  # Common utilities
+  - pyyaml
+  - h5py
+  - einops
+  - psutil
+  - tabulate
+
+  - pip:
+      - rich

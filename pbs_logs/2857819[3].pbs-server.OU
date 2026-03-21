@@ -1,0 +1,110 @@
+[START] 2026-03-21 15:46:45
+[INFO] hostname=dhler2u03-fat
+[INFO] repo_dir=/mnt/beegfs/2a/mb12724/theory-language-modelling
+[INFO] run_script=/mnt/beegfs/2a/mb12724/theory-language-modelling/run_rhm_transformer_single.py
+[INFO] output_dir=/mnt/beegfs/2a/mb12724/theory-language-modelling/results/rhm_transformer_bluecurve_seed0
+[INFO] array_index=3
+[INFO] train_size=16384
+[INFO] test_size=32768
+[INFO] batch_size=128
+[INFO] max_epochs=300
+[INFO] seed_rules=0
+[INFO] seed_sample=0
+[INFO] seed_model=0
+[INFO] device=cuda
+[INFO] conda_env_name=theory-lm
+[INFO] python_bin=python
+[INFO] which_python=/home/2a/mb12724/miniconda3/envs/theory-lm/bin/python
+[INFO] python_version=Python 3.10.20
+[INFO] orig_cuda_visible_devices=GPU-d942597d-8638-cbb3-8464-3ebd05afb154
+[INFO] cuda_visible_devices=0
+[INFO] nvidia-smi:
+Sat Mar 21 15:46:45 2026       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 470.57.02    Driver Version: 470.57.02    CUDA Version: 11.4     |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|                               |                      |               MIG M. |
+|===============================+======================+======================|
+|   0  Tesla V100-SXM2...  On   | 00000000:86:00.0 Off |                    0 |
+| N/A   32C    P0    41W / 300W |     15MiB / 32510MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                                  |
+|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+|        ID   ID                                                   Usage      |
+|=============================================================================|
+|    0   N/A  N/A      2351      G   /usr/libexec/Xorg                  14MiB |
++-----------------------------------------------------------------------------+
+[INFO] torch_cuda_probe:
+torch_version = 1.12.1+cu113
+cuda_runtime = 11.3
+cuda_available = True
+cuda_device_count = 1
+cuda_device_0 = Tesla V100-SXM2-32GB
+[CMD] python -u /mnt/beegfs/2a/mb12724/theory-language-modelling/run_rhm_transformer_single.py --repo_dir /mnt/beegfs/2a/mb12724/theory-language-modelling --output_dir /mnt/beegfs/2a/mb12724/theory-language-modelling/results/rhm_transformer_bluecurve_seed0 --python_bin python --device cuda --train_size 16384 --test_size 32768 --batch_size 128 --max_epochs 300 --seed_rules 0 --seed_sample 0 --seed_model 0 --tag paper_L3_s2_v32_m8_bluecurve_seed0
+[RUN] launching blue-curve point P=16384
+[INFO] Running one RHM transformer training
+[INFO] repo_dir=/mnt/beegfs/2a/mb12724/theory-language-modelling
+[INFO] output_dir=/mnt/beegfs/2a/mb12724/theory-language-modelling/results/rhm_transformer_bluecurve_seed0
+[INFO] outname=/mnt/beegfs/2a/mb12724/theory-language-modelling/results/rhm_transformer_bluecurve_seed0/paper_L3_s2_v32_m8_bluecurve_seed0_P16384_sr0_ss0_sm0.pkl
+[INFO] effective_batch_size=128
+[CMD] python -u /mnt/beegfs/2a/mb12724/theory-language-modelling/main.py --device cuda --dataset rhm --mode masked --num_features 32 --num_classes 32 --num_synonyms 8 --tuple_size 2 --num_layers 3 --seed_rules 0 --num_tokens 8 --train_size 16384 --batch_size 128 --test_size 32768 --seed_sample 0 --input_format onehot --whitening 0 --model transformer_mla --depth 3 --num_heads 16 --embedding_dim 512 --seed_model 0 --lr 0.01 --optim adam --scheduler warmup --scheduler_time 10 --max_epochs 300 --print_freq 10 --save_freq 25 --loss_threshold 0.001 --outname /mnt/beegfs/2a/mb12724/theory-language-modelling/results/rhm_transformer_bluecurve_seed0/paper_L3_s2_v32_m8_bluecurve_seed0_P16384_sr0_ss0_sm0.pkl
+[INFO] OMP_NUM_THREADS=4
+[INFO] MKL_NUM_THREADS=1
+
+A module that was compiled using NumPy 1.x cannot be run in
+NumPy 2.2.6 as it may crash. To support both 1.x and 2.x
+versions of NumPy, modules must be compiled with NumPy 2.0.
+Some module may need to rebuild instead e.g. with 'pybind11>=2.12'.
+
+If you are a user of the module, the easiest solution will be to
+downgrade to 'numpy<2' or try to upgrade the affected module.
+We expect that some modules will need time to support NumPy 2.
+
+Traceback (most recent call last):  File "/mnt/beegfs/2a/mb12724/theory-language-modelling/main.py", line 166, in <module>
+    run( args)
+  File "/mnt/beegfs/2a/mb12724/theory-language-modelling/main.py", line 40, in run
+    train_loader, test_loader = init.init_data( args)
+  File "/mnt/beegfs/2a/mb12724/theory-language-modelling/init.py", line 41, in init_data
+    dataset = datasets.RandomHierarchyModel(
+  File "/mnt/beegfs/2a/mb12724/theory-language-modelling/datasets/random_hierarchy_model.py", line 111, in __init__
+    rules = sample_rules( num_features, num_classes, num_synonyms, tuple_size, num_layers, seed=seed_rules)
+  File "/mnt/beegfs/2a/mb12724/theory-language-modelling/datasets/random_hierarchy_model.py", line 31, in sample_rules
+    rules[0] = torch.tensor(
+/mnt/beegfs/2a/mb12724/theory-language-modelling/datasets/random_hierarchy_model.py:31: UserWarning: Failed to initialize NumPy: _ARRAY_API not found (Triggered internally at  ../torch/csrc/utils/tensor_numpy.cpp:68.)
+  rules[0] = torch.tensor(
+Epoch :  1 	 train loss: 3.5429 ,test loss: 3.5433 , test acc.: 0.01 , epoch time: 0.913641
+Epoch :  2 	 train loss: 3.3880 ,test loss: 3.2774 , test acc.: 0.08 , epoch time: 1.105428
+Epoch :  3 	 train loss: 2.7255 ,test loss: 2.4428 , test acc.: 0.15 , epoch time: 1.171217
+Epoch :  5 	 train loss: 2.3256 ,test loss: 2.3103 , test acc.: 0.14 , epoch time: 1.144790
+Epoch :  6 	 train loss: 2.3180 ,test loss: 2.2604 , test acc.: 0.15 , epoch time: 1.171088
+Epoch :  7 	 train loss: 2.3095 ,test loss: 2.3535 , test acc.: 0.15 , epoch time: 1.190239
+Epoch :  10 	 train loss: 2.3496 ,test loss: 2.3627 , test acc.: 0.15 , epoch time: 1.144716
+Epoch :  20 	 train loss: 2.1071 ,test loss: 2.3144 , test acc.: 0.19 , epoch time: 1.044808
+Epoch :  30 	 train loss: 1.0945 ,test loss: 3.0277 , test acc.: 0.23 , epoch time: 1.011857
+Epoch :  40 	 train loss: 0.5100 ,test loss: 4.2577 , test acc.: 0.23 , epoch time: 0.995308
+Epoch :  50 	 train loss: 0.4009 ,test loss: 5.0231 , test acc.: 0.23 , epoch time: 0.985273
+Epoch :  60 	 train loss: 0.2646 ,test loss: 5.5201 , test acc.: 0.22 , epoch time: 0.978688
+Epoch :  70 	 train loss: 0.3045 ,test loss: 5.1191 , test acc.: 0.22 , epoch time: 0.974042
+Epoch :  80 	 train loss: 0.3665 ,test loss: 5.3822 , test acc.: 0.22 , epoch time: 0.970584
+Epoch :  90 	 train loss: 0.3969 ,test loss: 5.8766 , test acc.: 0.22 , epoch time: 0.967760
+Epoch :  100 	 train loss: 0.6181 ,test loss: 4.8786 , test acc.: 0.22 , epoch time: 0.965532
+Epoch :  110 	 train loss: 0.2114 ,test loss: 5.1570 , test acc.: 0.22 , epoch time: 0.963820
+Epoch :  120 	 train loss: 0.1555 ,test loss: 5.3033 , test acc.: 0.22 , epoch time: 0.962266
+Epoch :  130 	 train loss: 0.1783 ,test loss: 5.5294 , test acc.: 0.22 , epoch time: 0.960979
+Epoch :  140 	 train loss: 0.1196 ,test loss: 5.7814 , test acc.: 0.22 , epoch time: 0.960020
+Epoch :  150 	 train loss: 0.1952 ,test loss: 5.8946 , test acc.: 0.22 , epoch time: 0.959046
+Epoch :  160 	 train loss: 0.2151 ,test loss: 5.6768 , test acc.: 0.22 , epoch time: 0.958198
+Epoch :  170 	 train loss: 0.1410 ,test loss: 5.8181 , test acc.: 0.22 , epoch time: 0.957538
+Epoch :  180 	 train loss: 0.2554 ,test loss: 6.3854 , test acc.: 0.22 , epoch time: 0.956863
+Epoch :  190 	 train loss: 0.0176 ,test loss: 7.0335 , test acc.: 0.22 , epoch time: 0.956271
+Epoch :  200 	 train loss: 0.0528 ,test loss: 6.9636 , test acc.: 0.22 , epoch time: 0.955812
+Epoch :  210 	 train loss: 0.0023 ,test loss: 7.4211 , test acc.: 0.22 , epoch time: 0.955270
+Epoch :  220 	 train loss: 0.0011 ,test loss: 7.6727 , test acc.: 0.23 , epoch time: 0.954799
+Epoch :  230 	 train loss: 0.0015 ,test loss: 7.8854 , test acc.: 0.23 , epoch time: 0.954461
+Epoch :  240 	 train loss: 0.0010 ,test loss: 8.0865 , test acc.: 0.22 , epoch time: 0.954046
+[END] 2026-03-21 15:50:40 return_code=0
