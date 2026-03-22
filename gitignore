@@ -20,7 +20,6 @@ logs/
 *.log
 *.out
 *.err
-*.pkl
 
 # =========================
 # Raw experiment outputs

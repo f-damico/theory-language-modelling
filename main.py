@@ -39,45 +39,42 @@ def build_auto_outname(args):
 
     return str(run_dir / filename)
 
-def run( args):
+import os
+import pickle
+import time
+import copy
 
-    # reduce batch_size when larger than train_size
-    if (args.batch_size >= args.train_size):
-        args.batch_size = args.train_size
-    
-    assert (args.train_size%args.batch_size)==0, 'batch_size must divide train_size!'
+def run(args):
 
-    if args.accumulation:
-        accumulation = args.train_size // args.batch_size
+    os.makedirs(os.path.dirname(args.outname), exist_ok=True)
+
+    train_loader, test_loader = init.init_data(args)
+    model = init.init_model(args)
+    criterion, optimizer, scheduler = init.init_training(model, args)
+
+    model0 = copy.deepcopy(model)
+    dynamics, best = init.init_output(model, criterion, train_loader, test_loader, args)
+
+    if args.print_freq < args.max_epochs:
+        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=True)
     else:
-        accumulation = 1
+        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=False)
 
-    train_loader, test_loader = init.init_data( args)
-
-    model = init.init_model( args)
-    model0 = copy.deepcopy( model)
-
-    if args.scheduler_time is None:
-        args.scheduler_time = args.max_epochs
-    criterion, optimizer, scheduler = init.init_training( model, args)
-
-    dynamics, best = init.init_output( model, criterion, train_loader, test_loader, args)
-    if args.print_freq >= 10:
-        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=True)
-    else:
-        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=False)
-    save_ckpts = init.init_loglinckpt( args.save_freq, args.max_epochs, fill=False)
+    save_ckpts = init.init_loglinckpt(args.save_freq, args.max_epochs, fill=False)
 
     print_ckpt = next(print_ckpts)
     save_ckpt = next(save_ckpts)
 
     start_time = time.time()
+    last_loss = None
 
     for epoch in range(args.max_epochs):
 
-        loss = training.train(model, train_loader, accumulation, criterion, optimizer, scheduler)
+        loss = training.train(model, train_loader, criterion, optimizer, scheduler)
+        last_loss = loss
+        did_eval_this_epoch = False
 
-        # evaluate / print when needed
+        # evaluation / logging
         if (epoch + 1) == print_ckpt:
 
             avg_epoch_time = (time.time() - start_time) / (epoch + 1)
@@ -87,7 +84,6 @@ def run( args):
                 best['epoch'] = epoch + 1
                 best['loss'] = test_loss
                 best['acc'] = test_acc
-                best['model'] = copy.deepcopy(model.state_dict())
 
             dynamics.append({
                 't': epoch + 1,
@@ -105,19 +101,18 @@ def run( args):
             )
 
             print_ckpt = next(print_ckpts)
+            did_eval_this_epoch = True
 
-        # save independently from print checkpoints
+        # saving, independent of print
         if (epoch + 1) == save_ckpt:
 
-            # if this epoch was not evaluated above, evaluate now so dynamics are up to date
-            if len(dynamics) == 0 or dynamics[-1]['t'] != (epoch + 1):
+            if not did_eval_this_epoch:
                 test_loss, test_acc = measures.test(model, test_loader)
 
                 if test_loss < best['loss']:
                     best['epoch'] = epoch + 1
                     best['loss'] = test_loss
                     best['acc'] = test_acc
-                    best['model'] = copy.deepcopy(model.state_dict())
 
                 dynamics.append({
                     't': epoch + 1,
@@ -126,12 +121,8 @@ def run( args):
                     'testacc': test_acc
                 })
 
-            print(f'Checkpoint at epoch {epoch+1}, saving data ...')
-
             output = {
-                'init': model0.state_dict(),
                 'best': best,
-                'model': copy.deepcopy(model.state_dict()),
                 'dynamics': dynamics,
                 'epoch': epoch + 1
             }
@@ -140,10 +131,10 @@ def run( args):
                 pickle.dump(args, handle)
                 pickle.dump(output, handle)
 
-            print(f"Saved file to: {args.outname}")
+            print(f"Saved checkpoint to: {args.outname}")
             save_ckpt = next(save_ckpts)
 
-        # early stop save
+        # early stopping
         if loss <= args.loss_threshold:
 
             if len(dynamics) == 0 or dynamics[-1]['t'] != (epoch + 1):
@@ -153,7 +144,6 @@ def run( args):
                     best['epoch'] = epoch + 1
                     best['loss'] = test_loss
                     best['acc'] = test_acc
-                    best['model'] = copy.deepcopy(model.state_dict())
 
                 dynamics.append({
                     't': epoch + 1,
@@ -163,9 +153,7 @@ def run( args):
                 })
 
             output = {
-                'init': model0.state_dict(),
                 'best': best,
-                'model': copy.deepcopy(model.state_dict()),
                 'dynamics': dynamics,
                 'epoch': epoch + 1
             }
@@ -174,11 +162,10 @@ def run( args):
                 pickle.dump(args, handle)
                 pickle.dump(output, handle)
 
-            print(f"Saved file to: {args.outname}")
-            break
+            print(f"Early-stop save to: {args.outname}")
+            return
 
-    os.makedirs(os.path.dirname(args.outname), exist_ok=True)
-        # final save at end of training if last epoch not already stored
+    # unconditional final save
     if len(dynamics) == 0 or dynamics[-1]['t'] != args.max_epochs:
         test_loss, test_acc = measures.test(model, test_loader)
 
@@ -186,19 +173,16 @@ def run( args):
             best['epoch'] = args.max_epochs
             best['loss'] = test_loss
             best['acc'] = test_acc
-            best['model'] = copy.deepcopy(model.state_dict())
 
         dynamics.append({
             't': args.max_epochs,
-            'trainloss': loss,
+            'trainloss': last_loss,
             'testloss': test_loss,
             'testacc': test_acc
         })
 
     output = {
-        'init': model0.state_dict(),
         'best': best,
-        'model': copy.deepcopy(model.state_dict()),
         'dynamics': dynamics,
         'epoch': args.max_epochs
     }

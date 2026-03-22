@@ -248,7 +248,7 @@ def init_output( model, criterion, train_loader, test_loader, args):
     testloss, testacc = measures.test(model, test_loader)
     
     dynamics = [{'t': 0, 'trainloss': trainloss, 'testloss': testloss, 'testacc': testacc}] # add additional observables here
-    best = {'epoch':0, 'model': None, 'loss': testloss, 'acc': testacc}
+    best = {'epoch': 0, 'loss': testloss, 'acc': testacc}
 
     return dynamics, best
 

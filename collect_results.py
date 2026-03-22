@@ -3,6 +3,8 @@ from pathlib import Path
 import argparse
 import pickle
 import numpy as np
+import torch
+import io
 
 
 SEED_KEYS = ("seed_rules", "seed_sample", "seed_model")
@@ -17,10 +19,22 @@ IGNORE_COMPARE_KEYS = {
 }
 
 
+class CPU_Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == "torch.storage" and name == "_load_from_bytes":
+            return lambda b: torch.load(io.BytesIO(b), map_location="cpu")
+        return super().find_class(module, name)
+
+
 def load_one_file(path):
-    with open(path, "rb") as f:
-        args = pickle.load(f)
-        output = pickle.load(f)
+    old_load_from_bytes = torch.storage._load_from_bytes
+    torch.storage._load_from_bytes = lambda b: torch.load(io.BytesIO(b), map_location="cpu")
+    try:
+        with open(path, "rb") as f:
+            args = pickle.load(f)
+            output = pickle.load(f)
+    finally:
+        torch.storage._load_from_bytes = old_load_from_bytes
 
     if hasattr(args, "__dict__"):
         args_dict = vars(args).copy()
