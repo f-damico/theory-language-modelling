@@ -9,6 +9,7 @@ import random
 
 import functools
 import argparse
+import os
 
 import torch
 import torch.nn as nn
@@ -23,6 +24,20 @@ import models
 import init
 import training
 import measures
+from pathlib import Path
+
+def build_auto_outname(args):
+    data_root = Path(args.data_root).expanduser().resolve()
+    run_dir = data_root / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = (
+        f"seed_rules_{args.seed_rules}"
+        f"__seed_sample_{args.seed_sample}"
+        f"__seed_model_{args.seed_model}.pkl"
+    )
+
+    return str(run_dir / filename)
 
 def run( args):
 
@@ -60,52 +75,139 @@ def run( args):
 
     for epoch in range(args.max_epochs):
 
-        loss = training.train( model, train_loader, accumulation, criterion, optimizer, scheduler)
+        loss = training.train(model, train_loader, accumulation, criterion, optimizer, scheduler)
 
-        if (epoch+1)==print_ckpt:
+        # evaluate / print when needed
+        if (epoch + 1) == print_ckpt:
 
-            avg_epoch_time = (time.time()-start_time)/(epoch+1)
+            avg_epoch_time = (time.time() - start_time) / (epoch + 1)
             test_loss, test_acc = measures.test(model, test_loader)
 
-            if test_loss<best['loss']: # update best model if loss is smaller
-                best['epoch'] = epoch+1
+            if test_loss < best['loss']:
+                best['epoch'] = epoch + 1
                 best['loss'] = test_loss
                 best['acc'] = test_acc
-                best['model'] = copy.deepcopy( model.state_dict())
+                best['model'] = copy.deepcopy(model.state_dict())
 
-            dynamics.append({'t': epoch+1, 'trainloss': loss, 'testloss': test_loss, 'testacc': test_acc})
-            print('Epoch : ',epoch+1, '\t train loss: {:06.4f}'.format(loss), ',test loss: {:06.4f}'.format(test_loss), ', test acc.: {:04.2f}'.format(test_acc), ', epoch time: {:5f}'.format(avg_epoch_time))
+            dynamics.append({
+                't': epoch + 1,
+                'trainloss': loss,
+                'testloss': test_loss,
+                'testacc': test_acc
+            })
+
+            print(
+                'Epoch : ', epoch + 1,
+                '\t train loss: {:06.4f}'.format(loss),
+                ',test loss: {:06.4f}'.format(test_loss),
+                ', test acc.: {:04.2f}'.format(test_acc),
+                ', epoch time: {:5f}'.format(avg_epoch_time)
+            )
+
             print_ckpt = next(print_ckpts)
 
-            if (epoch+1)==save_ckpt:
+        # save independently from print checkpoints
+        if (epoch + 1) == save_ckpt:
 
-                print(f'Checkpoint at epoch {epoch+1}, saving data ...')
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
-                save_ckpt = next(save_ckpts)
+            # if this epoch was not evaluated above, evaluate now so dynamics are up to date
+            if len(dynamics) == 0 or dynamics[-1]['t'] != (epoch + 1):
+                test_loss, test_acc = measures.test(model, test_loader)
 
-            if loss <= args.loss_threshold:
+                if test_loss < best['loss']:
+                    best['epoch'] = epoch + 1
+                    best['loss'] = test_loss
+                    best['acc'] = test_acc
+                    best['model'] = copy.deepcopy(model.state_dict())
 
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
+                dynamics.append({
+                    't': epoch + 1,
+                    'trainloss': loss,
+                    'testloss': test_loss,
+                    'testacc': test_acc
+                })
 
-                break
+            print(f'Checkpoint at epoch {epoch+1}, saving data ...')
+
+            output = {
+                'init': model0.state_dict(),
+                'best': best,
+                'model': copy.deepcopy(model.state_dict()),
+                'dynamics': dynamics,
+                'epoch': epoch + 1
+            }
+
+            with open(args.outname, "wb") as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
+
+            print(f"Saved file to: {args.outname}")
+            save_ckpt = next(save_ckpts)
+
+        # early stop save
+        if loss <= args.loss_threshold:
+
+            if len(dynamics) == 0 or dynamics[-1]['t'] != (epoch + 1):
+                test_loss, test_acc = measures.test(model, test_loader)
+
+                if test_loss < best['loss']:
+                    best['epoch'] = epoch + 1
+                    best['loss'] = test_loss
+                    best['acc'] = test_acc
+                    best['model'] = copy.deepcopy(model.state_dict())
+
+                dynamics.append({
+                    't': epoch + 1,
+                    'trainloss': loss,
+                    'testloss': test_loss,
+                    'testacc': test_acc
+                })
+
+            output = {
+                'init': model0.state_dict(),
+                'best': best,
+                'model': copy.deepcopy(model.state_dict()),
+                'dynamics': dynamics,
+                'epoch': epoch + 1
+            }
+
+            with open(args.outname, "wb") as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
+
+            print(f"Saved file to: {args.outname}")
+            break
+
+    os.makedirs(os.path.dirname(args.outname), exist_ok=True)
+        # final save at end of training if last epoch not already stored
+    if len(dynamics) == 0 or dynamics[-1]['t'] != args.max_epochs:
+        test_loss, test_acc = measures.test(model, test_loader)
+
+        if test_loss < best['loss']:
+            best['epoch'] = args.max_epochs
+            best['loss'] = test_loss
+            best['acc'] = test_acc
+            best['model'] = copy.deepcopy(model.state_dict())
+
+        dynamics.append({
+            't': args.max_epochs,
+            'trainloss': loss,
+            'testloss': test_loss,
+            'testacc': test_acc
+        })
+
+    output = {
+        'init': model0.state_dict(),
+        'best': best,
+        'model': copy.deepcopy(model.state_dict()),
+        'dynamics': dynamics,
+        'epoch': args.max_epochs
+    }
+
+    with open(args.outname, "wb") as handle:
+        pickle.dump(args, handle)
+        pickle.dump(output, handle)
+
+    print(f"Final save to: {args.outname}")
 
     return None
 
@@ -159,8 +261,20 @@ parser.add_argument('--max_epochs', type=int, default=100)
 parser.add_argument('--print_freq', type=int, help='frequency of prints', default=10)
 parser.add_argument('--save_freq', type=int, help='frequency of saves', default=10)
 parser.add_argument('--loss_threshold', type=float, default=1e-3)
-parser.add_argument('--outname', type=str, required=True, help='path of the output file')
-
+parser.add_argument('--data_root', type=str, default='data',
+                    help='root folder where run folders are created')
+parser.add_argument('--run_name', type=str, default=None,
+                    help='name of the subfolder inside data_root where this run is saved')
+parser.add_argument('--outname', type=str, default=None,
+                    help='explicit output file path; if None it is built automatically from run_name')
 args = parser.parse_args()
+
+if args.outname is None and args.run_name is None:
+    parser.error("you must provide either --outname or --run_name")
+
+if args.outname is None:
+    args.outname = build_auto_outname(args)
+
+print(f"Saving run to: {args.outname}")
 
 run( args)
