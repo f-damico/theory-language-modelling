@@ -18,6 +18,15 @@ IGNORE_COMPARE_KEYS = {
     *SEED_KEYS,
 }
 
+SPECTRAL_KEY = "specnorm"
+L2_KEY = "l2norm"
+SPECTRAL_NO_QK_KEY = "specnorm_no_qk"
+
+MARGIN_MIN_KEY = "margin_min"
+MARGIN_MEAN_KEY = "margin_mean"
+MARGIN_MAX_KEY = "margin_max"
+MARGIN_STD_KEY = "margin_std"
+
 
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
@@ -54,13 +63,47 @@ def dynamics_to_arrays(output):
             "trainloss": np.array([], dtype=float),
             "testloss": np.array([], dtype=float),
             "testacc": np.array([], dtype=float),
+            "err": np.array([], dtype=float),
+            "spectral": np.array([], dtype=float),
+            "spectral_no_qk": np.array([], dtype=float),
+            "l2": np.array([], dtype=float),
+            "margin_min": np.array([], dtype=float),
+            "margin_mean": np.array([], dtype=float),
+            "margin_max": np.array([], dtype=float),
+            "margin_std": np.array([], dtype=float),
         }
 
+    epochs = np.array([d["t"] for d in dyn], dtype=int)
+    trainloss = np.array([d["trainloss"] for d in dyn], dtype=float)
+    testloss = np.array([d["testloss"] for d in dyn], dtype=float)
+    testacc = np.array([d["testacc"] for d in dyn], dtype=float)
+
+    # test error = 1 - accuracy
+    err = 1.0 - testacc
+
+    # if a quantity is missing at some timestep, store nan
+    spectral = np.array([d.get(SPECTRAL_KEY, np.nan) for d in dyn], dtype=float)
+    spectral_no_qk = np.array([d.get(SPECTRAL_NO_QK_KEY, np.nan) for d in dyn], dtype=float)
+    l2 = np.array([d.get(L2_KEY, np.nan) for d in dyn], dtype=float)
+
+    margin_min = np.array([d.get(MARGIN_MIN_KEY, np.nan) for d in dyn], dtype=float)
+    margin_mean = np.array([d.get(MARGIN_MEAN_KEY, np.nan) for d in dyn], dtype=float)
+    margin_max = np.array([d.get(MARGIN_MAX_KEY, np.nan) for d in dyn], dtype=float)
+    margin_std = np.array([d.get(MARGIN_STD_KEY, np.nan) for d in dyn], dtype=float)
+
     return {
-        "epochs": np.array([d["t"] for d in dyn], dtype=int),
-        "trainloss": np.array([d["trainloss"] for d in dyn], dtype=float),
-        "testloss": np.array([d["testloss"] for d in dyn], dtype=float),
-        "testacc": np.array([d["testacc"] for d in dyn], dtype=float),
+        "epochs": epochs,
+        "trainloss": trainloss,
+        "testloss": testloss,
+        "testacc": testacc,
+        "err": err,
+        "spectral": spectral,
+        "spectral_no_qk": spectral_no_qk,
+        "l2": l2,
+        "margin_min": margin_min,
+        "margin_mean": margin_mean,
+        "margin_max": margin_max,
+        "margin_std": margin_std,
     }
 
 
@@ -124,6 +167,14 @@ def main():
             "trainloss": dyn["trainloss"],
             "testloss": dyn["testloss"],
             "testacc": dyn["testacc"],
+            "err": dyn["err"],
+            "spectral": dyn["spectral"],
+            "spectral_no_qk": dyn["spectral_no_qk"],
+            "l2": dyn["l2"],
+            "margin_min": dyn["margin_min"],
+            "margin_mean": dyn["margin_mean"],
+            "margin_max": dyn["margin_max"],
+            "margin_std": dyn["margin_std"],
             "best_loss": float(best.get("loss", np.nan)),
             "best_acc": float(best.get("acc", np.nan)),
             "best_epoch": float(best.get("epoch", np.nan)),
@@ -142,7 +193,7 @@ def main():
                 f"Problematic file: {e['path']}"
             )
 
-    # Sorted unique P and global union of epochs
+    # Sorted unique P and global union of saved epochs
     P_values = np.array(sorted({e["train_size"] for e in entries}), dtype=int)
     epoch_values = np.array(sorted({int(t) for e in entries for t in e["epochs"]}), dtype=int)
 
@@ -165,6 +216,14 @@ def main():
     trainloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
     testloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
     testacc_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    spectral_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    spectral_no_qk_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    l2_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+
+    margin_min_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    margin_mean_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    margin_max_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    margin_std_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
 
     # Raw scalar summaries: shape (nP, max_seeds)
     best_loss_raw = np.full((nP, max_seeds), np.nan, dtype=float)
@@ -198,21 +257,50 @@ def main():
                 trainloss_raw[iP, iseed, j] = e["trainloss"][local_i]
                 testloss_raw[iP, iseed, j] = e["testloss"][local_i]
                 testacc_raw[iP, iseed, j] = e["testacc"][local_i]
+                spectral_raw[iP, iseed, j] = e["spectral"][local_i]
+                spectral_no_qk_raw[iP, iseed, j] = e["spectral_no_qk"][local_i]
+                l2_raw[iP, iseed, j] = e["l2"][local_i]
+
+                margin_min_raw[iP, iseed, j] = e["margin_min"][local_i]
+                margin_mean_raw[iP, iseed, j] = e["margin_mean"][local_i]
+                margin_max_raw[iP, iseed, j] = e["margin_max"][local_i]
+                margin_std_raw[iP, iseed, j] = e["margin_std"][local_i]
 
             best_loss_raw[iP, iseed] = e["best_loss"]
             best_acc_raw[iP, iseed] = e["best_acc"]
             best_epoch_raw[iP, iseed] = e["best_epoch"]
             last_saved_epoch_raw[iP, iseed] = e["last_saved_epoch"]
 
+    # Derived raw error: shape (nP, max_seeds, nT)
+    err_raw = 1.0 - testacc_raw
+
     # Aggregate over seed axis=1
     trainloss_mean, trainloss_std, trainloss_n = nanmean_std_with_flag(trainloss_raw, axis=1)
     testloss_mean, testloss_std, testloss_n = nanmean_std_with_flag(testloss_raw, axis=1)
     testacc_mean, testacc_std, testacc_n = nanmean_std_with_flag(testacc_raw, axis=1)
 
+    margin_min_mean, margin_min_std, margin_min_n = nanmean_std_with_flag(margin_min_raw, axis=1)
+    margin_mean_mean, margin_mean_std, margin_mean_n = nanmean_std_with_flag(margin_mean_raw, axis=1)
+    margin_max_mean, margin_max_std, margin_max_n = nanmean_std_with_flag(margin_max_raw, axis=1)
+    margin_std_mean, margin_std_std, margin_std_n = nanmean_std_with_flag(margin_std_raw, axis=1)
+
     best_loss_mean, best_loss_std, best_loss_n = nanmean_std_with_flag(best_loss_raw, axis=1)
     best_acc_mean, best_acc_std, best_acc_n = nanmean_std_with_flag(best_acc_raw, axis=1)
     best_epoch_mean, best_epoch_std, best_epoch_n = nanmean_std_with_flag(best_epoch_raw, axis=1)
     last_saved_epoch_mean, last_saved_epoch_std, last_saved_epoch_n = nanmean_std_with_flag(last_saved_epoch_raw, axis=1)
+
+    # Requested arrays: shape (nP, nT, nS)
+    err_seeds = np.transpose(err_raw, (0, 2, 1))
+    spectral_seeds = np.transpose(spectral_raw, (0, 2, 1))
+    spectral_no_qk_seeds = np.transpose(spectral_no_qk_raw, (0, 2, 1))
+    l2_seeds = np.transpose(l2_raw, (0, 2, 1))
+
+    margin_min_seeds = np.transpose(margin_min_raw, (0, 2, 1))
+    margin_mean_seeds = np.transpose(margin_mean_raw, (0, 2, 1))
+    margin_max_seeds = np.transpose(margin_max_raw, (0, 2, 1))
+    margin_std_seeds = np.transpose(margin_std_raw, (0, 2, 1))
+
+    T_arr = epoch_values.copy()
 
     result = {
         # identifiers
@@ -225,6 +313,7 @@ def main():
         # axes
         "P_values": P_values,                 # shape (nP,)
         "epoch_values": epoch_values,         # shape (nT,)
+        "T_arr": T_arr,                       # shape (nT,)
         "num_seeds": num_seeds,               # shape (nP,)
         "seed_triplets": seed_triplets,       # shape (nP, max_seeds, 3)
 
@@ -232,6 +321,21 @@ def main():
         "trainloss_raw": trainloss_raw,       # shape (nP, max_seeds, nT)
         "testloss_raw": testloss_raw,         # shape (nP, max_seeds, nT)
         "testacc_raw": testacc_raw,           # shape (nP, max_seeds, nT)
+        "margin_min_raw": margin_min_raw,     # shape (nP, max_seeds, nT)
+        "margin_mean_raw": margin_mean_raw,   # shape (nP, max_seeds, nT)
+        "margin_max_raw": margin_max_raw,     # shape (nP, max_seeds, nT)
+        "margin_std_raw": margin_std_raw,     # shape (nP, max_seeds, nT)
+
+        # requested seed-resolved arrays
+        "err_seeds": err_seeds,                       # shape (nP, nT, max_seeds)
+        "spectral_seeds": spectral_seeds,             # shape (nP, nT, max_seeds)
+        "spectral_no_qk_raw": spectral_no_qk_raw,
+        "spectral_no_qk_seeds": spectral_no_qk_seeds,
+        "l2_seeds": l2_seeds,                         # shape (nP, nT, max_seeds)
+        "margin_min_seeds": margin_min_seeds,         # shape (nP, nT, max_seeds)
+        "margin_mean_seeds": margin_mean_seeds,       # shape (nP, nT, max_seeds)
+        "margin_max_seeds": margin_max_seeds,         # shape (nP, nT, max_seeds)
+        "margin_std_seeds": margin_std_seeds,         # shape (nP, nT, max_seeds)
 
         # aggregated curves
         "trainloss_mean": trainloss_mean,     # shape (nP, nT)
@@ -245,6 +349,22 @@ def main():
         "testacc_mean": testacc_mean,         # shape (nP, nT)
         "testacc_std": testacc_std,           # shape (nP, nT)
         "testacc_n": testacc_n,               # shape (nP, nT)
+
+        "margin_min_mean": margin_min_mean,   # shape (nP, nT)
+        "margin_min_std": margin_min_std,     # shape (nP, nT)
+        "margin_min_n": margin_min_n,         # shape (nP, nT)
+
+        "margin_mean_mean": margin_mean_mean, # shape (nP, nT)
+        "margin_mean_std": margin_mean_std,   # shape (nP, nT)
+        "margin_mean_n": margin_mean_n,       # shape (nP, nT)
+
+        "margin_max_mean": margin_max_mean,   # shape (nP, nT)
+        "margin_max_std": margin_max_std,     # shape (nP, nT)
+        "margin_max_n": margin_max_n,         # shape (nP, nT)
+
+        "margin_std_mean": margin_std_mean,   # shape (nP, nT)
+        "margin_std_std": margin_std_std,     # shape (nP, nT)
+        "margin_std_n": margin_std_n,         # shape (nP, nT)
 
         # raw scalar summaries per seed
         "best_loss_raw": best_loss_raw,               # shape (nP, max_seeds)
@@ -280,6 +400,14 @@ def main():
     print(f"P values: {P_values.tolist()}")
     print(f"Global epoch checkpoints: {epoch_values.tolist()}")
     print(f"num_seeds per P: {num_seeds.tolist()}")
+    print(f"err_seeds shape: {err_seeds.shape}")
+    print(f"spectral_seeds shape: {spectral_seeds.shape}")
+    print(f"spectral_no_qk_seeds shape: {spectral_no_qk_seeds.shape}")
+    print(f"l2_seeds shape: {l2_seeds.shape}")
+    print(f"margin_min_seeds shape: {margin_min_seeds.shape}")
+    print(f"margin_mean_seeds shape: {margin_mean_seeds.shape}")
+    print(f"margin_max_seeds shape: {margin_max_seeds.shape}")
+    print(f"margin_std_seeds shape: {margin_std_seeds.shape}")
 
 
 if __name__ == "__main__":

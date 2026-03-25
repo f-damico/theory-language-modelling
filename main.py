@@ -9,7 +9,6 @@ import random
 
 import functools
 import argparse
-import os
 
 import torch
 import torch.nn as nn
@@ -24,174 +23,118 @@ import models
 import init
 import training
 import measures
-from pathlib import Path
 
-def build_auto_outname(args):
-    data_root = Path(args.data_root).expanduser().resolve()
-    run_dir = data_root / args.run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+def run( args):
 
-    filename = (
-        f"seed_rules_{args.seed_rules}"
-        f"__seed_sample_{args.seed_sample}"
-        f"__seed_model_{args.seed_model}.pkl"
-    )
+    # reduce batch_size when larger than train_size
+    if (args.batch_size >= args.train_size):
+        args.batch_size = args.train_size
+    
+    assert (args.train_size%args.batch_size)==0, 'batch_size must divide train_size!'
 
-    return str(run_dir / filename)
-
-import os
-import pickle
-import time
-import copy
-
-def run(args):
-
-    os.makedirs(os.path.dirname(args.outname), exist_ok=True)
-
-    train_loader, test_loader = init.init_data(args)
-    model = init.init_model(args)
-    criterion, optimizer, scheduler = init.init_training(model, args)
-
-    model0 = copy.deepcopy(model)
-    dynamics, best = init.init_output(model, criterion, train_loader, test_loader, args)
-
-    if args.print_freq < args.max_epochs:
-        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=True)
+    if args.accumulation:
+        accumulation = args.train_size // args.batch_size
     else:
-        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=False)
+        accumulation = 1
 
-    save_ckpts = init.init_loglinckpt(args.save_freq, args.max_epochs, fill=False)
+    train_loader, test_loader = init.init_data( args)
+
+    model = init.init_model( args)
+    model0 = copy.deepcopy( model)
+
+    if args.scheduler_time is None:
+        args.scheduler_time = args.max_epochs
+    criterion, optimizer, scheduler = init.init_training( model, args)
+
+    dynamics, best = init.init_output( model, criterion, train_loader, test_loader, args)
+    if args.print_freq >= 10:
+        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=True)
+    else:
+        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=False)
+    save_ckpts = init.init_loglinckpt( args.save_freq, args.max_epochs, fill=False)
 
     print_ckpt = next(print_ckpts)
     save_ckpt = next(save_ckpts)
 
     start_time = time.time()
-    last_loss = None
 
     for epoch in range(args.max_epochs):
 
-        loss = training.train(model, train_loader, criterion, optimizer, scheduler)
-        last_loss = loss
-        did_eval_this_epoch = False
+        loss = training.train( model, train_loader, accumulation, criterion, optimizer, scheduler)
 
-        # evaluation / logging
-        if (epoch + 1) == print_ckpt:
+        if (epoch+1)==print_ckpt:
 
-            avg_epoch_time = (time.time() - start_time) / (epoch + 1)
+            avg_epoch_time = (time.time()-start_time)/(epoch+1)
             test_loss, test_acc = measures.test(model, test_loader)
 
-            if test_loss < best['loss']:
-                best['epoch'] = epoch + 1
+            if test_loss<best['loss']: # update best model if loss is smaller
+                best['epoch'] = epoch+1
                 best['loss'] = test_loss
                 best['acc'] = test_acc
+                best['model'] = copy.deepcopy( model.state_dict())
 
-            dynamics.append({
-                't': epoch + 1,
-                'trainloss': loss,
-                'testloss': test_loss,
-                'testacc': test_acc
-            })
+            norm_measures = measures.get_norm_measures(model)
+            entry = {'t': epoch+1, 'trainloss': loss, 'testloss': test_loss, 'testacc': test_acc}
+            entry.update(norm_measures)
+            if args.compute_margin_stats:
+                entry.update(
+                    measures.get_margin_stats(
+                        model,
+                        train_loader,
+                        max_samples=args.margin_stats_max_samples,
+                        batch_size=args.batch_size,
+                    )
+                )
+            dynamics.append(entry)
 
-            print(
-                'Epoch : ', epoch + 1,
-                '\t train loss: {:06.4f}'.format(loss),
-                ',test loss: {:06.4f}'.format(test_loss),
-                ', test acc.: {:04.2f}'.format(test_acc),
-                ', epoch time: {:5f}'.format(avg_epoch_time)
+            log_message = 'Epoch : {}\t train loss: {:06.4f}, test loss: {:06.4f}, test acc.: {:04.2f}, epoch time: {:5f}'.format(
+                epoch+1, loss, test_loss, test_acc, avg_epoch_time
             )
-
+            if 'specnorm' in norm_measures:
+                log_message += ', spectral complexity: {:.6e}'.format(norm_measures['specnorm'])
+            if 'specnorm_no_qk' in norm_measures:
+                log_message += ', spectral complexity no QK: {:.6e}'.format(norm_measures['specnorm_no_qk'])
+            if 'l2norm' in norm_measures:
+                log_message += ', l2 norm: {:.6e}'.format(norm_measures['l2norm'])
+            if args.compute_margin_stats:
+                log_message += ', margin mean: {:.6e}, margin std: {:.6e}, margin min: {:.6e}, margin max: {:.6e}'.format(
+                    entry['margin_mean'],
+                    entry['margin_std'],
+                    entry['margin_min'],
+                    entry['margin_max'],
+                )
+            print(log_message)
             print_ckpt = next(print_ckpts)
-            did_eval_this_epoch = True
 
-        # saving, independent of print
-        if (epoch + 1) == save_ckpt:
+            if (epoch+1)==save_ckpt:
 
-            if not did_eval_this_epoch:
-                test_loss, test_acc = measures.test(model, test_loader)
+                print(f'Checkpoint at epoch {epoch+1}, saving data ...')
+                output = {
+                    'init': model0.state_dict(),
+                    'best': best,
+                    'model': copy.deepcopy(model.state_dict()),
+                    'dynamics': dynamics,
+                    'epoch': epoch+1
+                }
+                with open(args.outname, "wb") as handle:
+                    pickle.dump(args, handle)
+                    pickle.dump(output, handle)
+                save_ckpt = next(save_ckpts)
 
-                if test_loss < best['loss']:
-                    best['epoch'] = epoch + 1
-                    best['loss'] = test_loss
-                    best['acc'] = test_acc
+            if loss <= args.loss_threshold:
 
-                dynamics.append({
-                    't': epoch + 1,
-                    'trainloss': loss,
-                    'testloss': test_loss,
-                    'testacc': test_acc
-                })
+                output = {
+                    'init': model0.state_dict(),
+                    'best': best,
+                    'model': copy.deepcopy(model.state_dict()),
+                    'dynamics': dynamics,
+                    'epoch': epoch+1
+                }
+                with open(args.outname, "wb") as handle:
+                    pickle.dump(args, handle)
+                    pickle.dump(output, handle)
 
-            output = {
-                'best': best,
-                'dynamics': dynamics,
-                'epoch': epoch + 1
-            }
-
-            with open(args.outname, "wb") as handle:
-                pickle.dump(args, handle)
-                pickle.dump(output, handle)
-
-            print(f"Saved checkpoint to: {args.outname}")
-            save_ckpt = next(save_ckpts)
-
-        # early stopping
-        if loss <= args.loss_threshold:
-
-            if len(dynamics) == 0 or dynamics[-1]['t'] != (epoch + 1):
-                test_loss, test_acc = measures.test(model, test_loader)
-
-                if test_loss < best['loss']:
-                    best['epoch'] = epoch + 1
-                    best['loss'] = test_loss
-                    best['acc'] = test_acc
-
-                dynamics.append({
-                    't': epoch + 1,
-                    'trainloss': loss,
-                    'testloss': test_loss,
-                    'testacc': test_acc
-                })
-
-            output = {
-                'best': best,
-                'dynamics': dynamics,
-                'epoch': epoch + 1
-            }
-
-            with open(args.outname, "wb") as handle:
-                pickle.dump(args, handle)
-                pickle.dump(output, handle)
-
-            print(f"Early-stop save to: {args.outname}")
-            return
-
-    # unconditional final save
-    if len(dynamics) == 0 or dynamics[-1]['t'] != args.max_epochs:
-        test_loss, test_acc = measures.test(model, test_loader)
-
-        if test_loss < best['loss']:
-            best['epoch'] = args.max_epochs
-            best['loss'] = test_loss
-            best['acc'] = test_acc
-
-        dynamics.append({
-            't': args.max_epochs,
-            'trainloss': last_loss,
-            'testloss': test_loss,
-            'testacc': test_acc
-        })
-
-    output = {
-        'best': best,
-        'dynamics': dynamics,
-        'epoch': args.max_epochs
-    }
-
-    with open(args.outname, "wb") as handle:
-        pickle.dump(args, handle)
-        pickle.dump(output, handle)
-
-    print(f"Final save to: {args.outname}")
+                break
 
     return None
 
@@ -206,6 +149,8 @@ parser.add_argument('--dataset', type=str)
 parser.add_argument('--mode', type=str, default=None)
 parser.add_argument('--num_features', metavar='v', type=int, help='number of features')
 parser.add_argument('--num_classes', metavar='n', type=int, help='number of classes')
+parser.add_argument('--a', type=float, default=-1.0,
+                    help='if a<0 use the current RHM dataset; if a>=0 use power_law RHM with zipf=a on the last layer')
 parser.add_argument('--num_synonyms', metavar='m', type=int, help='multiplicity of low-level representations')
 parser.add_argument('--tuple_size', metavar='s', type=int, help='size of low-level representations')
 parser.add_argument('--num_layers', metavar='L', type=int, help='number of layers')
@@ -214,6 +159,8 @@ parser.add_argument("--path", type=str, help='path of the text')
 parser.add_argument("--num_tokens", type=int, help='number of input tokens (spatial size)')
 parser.add_argument('--train_size', metavar='Ptr', type=int, help='training set size')
 parser.add_argument('--batch_size', metavar='B', type=int, help='batch size')
+parser.add_argument('--init_scale', type=float, default=1.0,
+                    help='multiplicative factor for random weight initialization')
 parser.add_argument('--test_size', metavar='Pte', type=int, help='test set size')
 parser.add_argument("--seed_sample", type=int, help='seed for the sampling of train and testset')
 parser.add_argument('--input_format', type=str, default='onehot')
@@ -245,20 +192,20 @@ parser.add_argument('--max_epochs', type=int, default=100)
 parser.add_argument('--print_freq', type=int, help='frequency of prints', default=10)
 parser.add_argument('--save_freq', type=int, help='frequency of saves', default=10)
 parser.add_argument('--loss_threshold', type=float, default=1e-3)
-parser.add_argument('--data_root', type=str, default='data',
-                    help='root folder where run folders are created')
-parser.add_argument('--run_name', type=str, default=None,
-                    help='name of the subfolder inside data_root where this run is saved')
-parser.add_argument('--outname', type=str, default=None,
-                    help='explicit output file path; if None it is built automatically from run_name')
+parser.add_argument('--outname', type=str, required=True, help='path of the output file')
+parser.add_argument(
+    '--compute_margin_stats',
+    default=False,
+    action='store_true',
+    help='compute min/max/mean/std of training margins on a random subset of the training set'
+)
+parser.add_argument(
+    '--margin_stats_max_samples',
+    type=int,
+    default=4096,
+    help='maximum number of random training examples used to compute margin statistics'
+)
+
 args = parser.parse_args()
-
-if args.outname is None and args.run_name is None:
-    parser.error("you must provide either --outname or --run_name")
-
-if args.outname is None:
-    args.outname = build_auto_outname(args)
-
-print(f"Saving run to: {args.outname}")
 
 run( args)

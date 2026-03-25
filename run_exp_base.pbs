@@ -1,9 +1,9 @@
 #!/bin/bash
 #PBS -N rhm_bluecurve
-#PBS -q gpuq-longrun
+#PBS -q gpuq
 #PBS -J 0-8
-#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
-#PBS -l walltime=100:00:00
+#PBS -l select=1:ncpus=4:ngpus=1:mem=12gb
+#PBS -l walltime=8:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
@@ -31,9 +31,14 @@ SEED_MODEL="${SEED_MODEL:-0}"
 # Same architecture / training setting as the blue curve run
 TEST_SIZE="${TEST_SIZE:-32768}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
-MAX_EPOCHS="${MAX_EPOCHS:-64}"
+INIT_SCALE="${INIT_SCALE:-0.8}"
+MAX_EPOCHS="${MAX_EPOCHS:-128}"
 
 # Training-set sizes P for the blue m=8 curve
+
+A="${A:--1}"
+COMPUTE_MARGINS="${COMPUTE_MARGINS:-false}"
+
 TRAIN_SIZES=(
   256
   1024
@@ -43,7 +48,11 @@ TRAIN_SIZES=(
   262144
   1048576
   2097152
+  4194304
 )
+
+
+MARGIN_STATS_MAX_SAMPLES="${MARGIN_STATS_MAX_SAMPLES:-4096}"
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
 JOB_ID="${PBS_JOBID:-no_jobid}"
@@ -115,6 +124,8 @@ fi
     echo "[INFO] train_size=$TRAIN_SIZE"
     echo "[INFO] test_size=$TEST_SIZE"
     echo "[INFO] batch_size=$BATCH_SIZE"
+    echo "[INFO] a=$A"
+    echo "[INFO] INIT_SCALE=$INIT_SCALE"
     echo "[INFO] max_epochs=$MAX_EPOCHS"
     echo "[INFO] seed_rules=$SEED_RULES"
     echo "[INFO] seed_sample=$SEED_SAMPLE"
@@ -156,12 +167,26 @@ CMD=(
     --train_size "$TRAIN_SIZE"
     --test_size "$TEST_SIZE"
     --batch_size "$BATCH_SIZE"
+    --init_scale "$INIT_SCALE"
+    --a "$A"
     --max_epochs "$MAX_EPOCHS"
     --seed_rules "$SEED_RULES"
     --seed_sample "$SEED_SAMPLE"
     --seed_model "$SEED_MODEL"
     --tag "$TAG"
 )
+
+case "${COMPUTE_MARGINS,,}" in
+    true|1|yes|y)
+        CMD+=(--compute_margin_stats --margin_stats_max_samples "$MARGIN_STATS_MAX_SAMPLES")
+        ;;
+    false|0|no|n)
+        ;;
+    *)
+        echo "[ERROR] Invalid COMPUTE_MARGINS value: $COMPUTE_MARGINS" | tee -a "$ARRAY_LOG"
+        exit 1
+        ;;
+esac
 
 {
     echo "[CMD] ${CMD[*]}"
