@@ -115,8 +115,16 @@ def init_data(args):
     dataset.features, dataset.labels = dataset.features.to(args.device), dataset.labels.to(args.device)
 
     trainset = torch.utils.data.Subset(dataset, range(args.train_size))
+    
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.seed_sample)
+    
     train_loader = torch.utils.data.DataLoader(
-        trainset, batch_size=args.batch_size, shuffle=True, num_workers=0
+        trainset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
+        generator=train_generator,
     )
 
     if args.test_size:

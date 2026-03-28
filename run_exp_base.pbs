@@ -1,9 +1,9 @@
 #!/bin/bash
 #PBS -N rhm_bluecurve
-#PBS -q gpuq
-#PBS -J 0-8
-#PBS -l select=1:ncpus=4:ngpus=1:mem=12gb
-#PBS -l walltime=8:00:00
+#PBS -q gpuq-longrun
+#PBS -J 0-3
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l walltime=200:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
@@ -31,6 +31,7 @@ SEED_MODEL="${SEED_MODEL:-0}"
 # Same architecture / training setting as the blue curve run
 TEST_SIZE="${TEST_SIZE:-32768}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
+ACCUMULATION="${ACCUMULATION:-0}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
 MAX_EPOCHS="${MAX_EPOCHS:-128}"
 
@@ -40,15 +41,10 @@ A="${A:--1}"
 COMPUTE_MARGINS="${COMPUTE_MARGINS:-false}"
 
 TRAIN_SIZES=(
-  256
-  1024
   4096
   16384
   65536
   262144
-  1048576
-  2097152
-  4194304
 )
 
 
@@ -125,6 +121,7 @@ fi
     echo "[INFO] test_size=$TEST_SIZE"
     echo "[INFO] batch_size=$BATCH_SIZE"
     echo "[INFO] a=$A"
+    echo "[INFO] accumulation=$ACCUMULATION"
     echo "[INFO] INIT_SCALE=$INIT_SCALE"
     echo "[INFO] max_epochs=$MAX_EPOCHS"
     echo "[INFO] seed_rules=$SEED_RULES"
@@ -187,6 +184,10 @@ case "${COMPUTE_MARGINS,,}" in
         exit 1
         ;;
 esac
+
+if [ "$ACCUMULATION" = "1" ]; then
+    CMD+=(--accumulation)
+fi
 
 {
     echo "[CMD] ${CMD[*]}"

@@ -57,12 +57,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_heads", type=int, default=16)
     parser.add_argument("--embedding_dim", type=int, default=None,
                         help="Default is num_heads * num_features.")
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=5e-3)
     parser.add_argument("--scheduler_time", type=int, default=10,
                         help="Warmup length in epochs.")
 
     # Practical training defaults
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=128)  
+    parser.add_argument("--accumulation", action="store_true", default=False)
     parser.add_argument("--init_scale", type=float, default=1.0)
     parser.add_argument("--max_epochs", type=int, default=64)
     parser.add_argument("--print_freq", type=int, default=1)
@@ -148,6 +149,8 @@ def main() -> None:
             "--compute_margin_stats",
             "--margin_stats_max_samples", str(args.margin_stats_max_samples),
         ])
+    if args.accumulation:
+        cmd.append("--accumulation")
 
     print("[INFO] Running one RHM transformer training")
     print(f"[INFO] repo_dir={args.repo_dir}")
