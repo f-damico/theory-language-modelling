@@ -47,6 +47,53 @@ def run( args):
     criterion, optimizer, scheduler = init.init_training( model, args)
 
     dynamics, best = init.init_output( model, criterion, train_loader, test_loader, args)
+
+    dynamics_timestep = []
+
+    if args.save_trainstep_epochs is None:
+        save_trainstep_epochs = 0
+    else:
+        save_trainstep_epochs = args.save_trainstep_epochs
+        if save_trainstep_epochs < 0:
+            raise ValueError('--save_trainstep_epochs must be >= 0 or None')
+
+    if save_trainstep_epochs > 0:
+        print(
+            f"[INFO] save_trainstep_epochs={save_trainstep_epochs}: "
+            f"will save measures after every optimizer update for epochs "
+            f"0..{save_trainstep_epochs-1}"
+        )
+
+    def build_timestep_entry(epoch, update, global_update):
+        train_loss_step, _ = measures.test(model, train_loader)
+        test_loss_step, test_acc_step = measures.test(model, test_loader)
+
+        entry = {
+            't': global_update,          # timestep axis for this separate history
+            'epoch': epoch + 1,          # 1-based epoch for readability
+            'epoch0': epoch,             # 0-based epoch index
+            'update': update,            # update index within the epoch, starting from 1
+            'global_update': global_update,
+            'trainloss': train_loss_step,
+            'testloss': test_loss_step,
+            'testacc': test_acc_step,
+        }
+        entry.update(measures.get_norm_measures(model))
+        return entry
+
+    def make_output(epoch_done):
+        return {
+            'init': model0.state_dict(),
+            'best': best,
+            'model': copy.deepcopy(model.state_dict()),
+            'dynamics': dynamics,
+            'dynamics_timestep': dynamics_timestep,
+            'epoch': epoch_done,
+            'save_trainstep_epochs': args.save_trainstep_epochs,
+        }
+
+
+
     if args.print_freq >= 10:
         print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=True)
     else:
@@ -58,9 +105,34 @@ def run( args):
 
     start_time = time.time()
 
+    global_update = 0
+
     for epoch in range(args.max_epochs):
 
-        loss = training.train( model, train_loader, accumulation, criterion, optimizer, scheduler)
+        global_update = 0 if epoch == 0 else global_update
+
+        def post_update_callback(epoch, update, num_updates_epoch, batch_idx):
+            nonlocal global_update
+            global_update += 1
+
+            if epoch < save_trainstep_epochs:
+                entry = build_timestep_entry(
+                    epoch=epoch,
+                    update=update,
+                    global_update=global_update,
+                )
+                dynamics_timestep.append(entry)
+
+        loss = training.train(
+            model,
+            train_loader,
+            accumulation,
+            criterion,
+            optimizer,
+            scheduler,
+            epoch=epoch,
+            post_update_callback=post_update_callback if save_trainstep_epochs > 0 else None,
+        )
 
         if (epoch+1)==print_ckpt:
 
@@ -109,13 +181,7 @@ def run( args):
             if (epoch+1)==save_ckpt:
 
                 print(f'Checkpoint at epoch {epoch+1}, saving data ...')
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
+                output = make_output(epoch+1)
                 with open(args.outname, "wb") as handle:
                     pickle.dump(args, handle)
                     pickle.dump(output, handle)
@@ -123,13 +189,7 @@ def run( args):
 
             if loss <= args.loss_threshold:
 
-                output = {
-                    'init': model0.state_dict(),
-                    'best': best,
-                    'model': copy.deepcopy(model.state_dict()),
-                    'dynamics': dynamics,
-                    'epoch': epoch+1
-                }
+                output = make_output(epoch+1)
                 with open(args.outname, "wb") as handle:
                     pickle.dump(args, handle)
                     pickle.dump(output, handle)
@@ -186,6 +246,12 @@ parser.add_argument('--momentum', type=float, default=0.9)
 parser.add_argument('--scheduler', type=str, default=None)
 parser.add_argument('--scheduler_time', type=int, default=None)
 parser.add_argument('--max_epochs', type=int, default=100)
+parser.add_argument(
+    '--save_trainstep_epochs',
+    type=int,
+    default=None,
+    help='if > 0, save measures after every optimizer update during the first N epochs'
+)
 '''
 	OUTPUT ARGS
 '''

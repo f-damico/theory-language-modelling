@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N rhm_bluecurve
 #PBS -q gpuq-longrun
-#PBS -J 0-3
+#PBS -J 0-6
 #PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
 #PBS -l walltime=200:00:00
 #PBS -j oe
@@ -32,6 +32,7 @@ SEED_MODEL="${SEED_MODEL:-0}"
 TEST_SIZE="${TEST_SIZE:-32768}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 ACCUMULATION="${ACCUMULATION:-0}"
+SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
 MAX_EPOCHS="${MAX_EPOCHS:-128}"
 
@@ -45,6 +46,9 @@ TRAIN_SIZES=(
   16384
   65536
   262144
+  1048576
+  2097152
+  4194304
 )
 
 
@@ -122,6 +126,7 @@ fi
     echo "[INFO] batch_size=$BATCH_SIZE"
     echo "[INFO] a=$A"
     echo "[INFO] accumulation=$ACCUMULATION"
+    echo "[INFO] save_trainstep_epochs=${SAVE_TRAINSTEP_EPOCHS:-None}"
     echo "[INFO] INIT_SCALE=$INIT_SCALE"
     echo "[INFO] max_epochs=$MAX_EPOCHS"
     echo "[INFO] seed_rules=$SEED_RULES"
@@ -187,6 +192,10 @@ esac
 
 if [ "$ACCUMULATION" = "1" ]; then
     CMD+=(--accumulation)
+fi
+
+if [ -n "$SAVE_TRAINSTEP_EPOCHS" ]; then
+    CMD+=(--save_trainstep_epochs "$SAVE_TRAINSTEP_EPOCHS")
 fi
 
 {

@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         default=4096,
         help="maximum number of random training examples used for margin statistics",
     )
+    parser.add_argument(
+    "--save_trainstep_epochs",
+    type=int,
+    default=None,
+    help="If > 0, save measures after every optimizer update during the first N epochs."
+)
 
     # Seeds and runtime
     parser.add_argument("--seed_rules", type=int, default=0)
@@ -151,6 +157,11 @@ def main() -> None:
         ])
     if args.accumulation:
         cmd.append("--accumulation")
+        
+    if args.save_trainstep_epochs is not None:
+        cmd.extend([
+            "--save_trainstep_epochs", str(args.save_trainstep_epochs)
+        ])
 
     print("[INFO] Running one RHM transformer training")
     print(f"[INFO] repo_dir={args.repo_dir}")

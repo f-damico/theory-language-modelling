@@ -11,6 +11,7 @@ def test(model, dataloader):
     Returns:
         Classification accuracy of model in [0,1].
     """
+    was_training = model.training
     model.eval()
 
     correct = 0
@@ -26,6 +27,9 @@ def test(model, dataloader):
             loss += F.cross_entropy(outputs, targets, reduction='sum').item()
             correct += predictions.eq(targets).sum().item()
             total += targets.size(0)
+
+    if was_training:
+        model.train()
 
     return loss / total, 1.0 * correct / total
 
