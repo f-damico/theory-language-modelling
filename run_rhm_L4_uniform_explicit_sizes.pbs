@@ -1,0 +1,234 @@
+#!/bin/bash
+#PBS -N rhm_L4_uniform_mid
+#PBS -q gpuq-longrun
+#PBS -J 0-6
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -l walltime=200:00:00
+#PBS -j oe
+#PBS -o pbs_logs/
+
+set -eo pipefail
+
+REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
+RUN_SCRIPT="${RUN_SCRIPT:-$REPO_DIR/run_rhm_transformer_single.py}"
+
+DATA_ROOT="${DATA_ROOT:-$REPO_DIR/data}"
+RUN_NAME="${RUN_NAME:-rhm_L4_uniform_midpoints}"
+OUTPUT_DIR="${OUTPUT_DIR:-$DATA_ROOT/$RUN_NAME}"
+
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-rhm}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+DEVICE="${DEVICE:-cuda}"
+TAG="${TAG:-paper_L4_s2_v32_m4_midpoints}"
+
+# Fixed seeds: one realization only
+SEED_RULES="${SEED_RULES:-0}"
+SEED_SAMPLE="${SEED_SAMPLE:-0}"
+SEED_MODEL="${SEED_MODEL:-0}"
+
+# -----------------------------
+# RHM: uniform unambiguous rules
+# -----------------------------
+# Chosen parameters:
+# - v=32, s=2, L=4, m=4
+# - uniform rules are what the dataset generator implements
+# - num_tokens = s^L = 16
+# - m=4 keeps the four theoretical step scales in a reachable range
+# - unambiguity still holds because m <= v^(s-1) = 32
+NUM_FEATURES="${NUM_FEATURES:-32}"
+NUM_CLASSES="${NUM_CLASSES:-32}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-4}"
+TUPLE_SIZE="${TUPLE_SIZE:-2}"
+NUM_LAYERS="${NUM_LAYERS:-4}"
+NUM_TOKENS="${NUM_TOKENS:-16}"
+
+# -----------------------------
+# Transformer matched to the RHM depth
+# -----------------------------
+DEPTH="${DEPTH:-4}"
+NUM_HEADS="${NUM_HEADS:-16}"
+EMBEDDING_DIM="${EMBEDDING_DIM:-512}"
+LR="${LR:-2e-4}"
+SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
+
+# Training / logging
+TEST_SIZE="${TEST_SIZE:-32768}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
+INIT_SCALE="${INIT_SCALE:-0.8}"
+MAX_EPOCHS="${MAX_EPOCHS:-256}"
+PRINT_FREQ="${PRINT_FREQ:-1}"
+SAVE_FREQ="${SAVE_FREQ:-25}"
+LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
+
+# ---------------------------------------------------------------
+# Explicit train sizes (5 plateau-centered values, rounded to 128)
+# ---------------------------------------------------------------
+# Theoretical steps for v=32, m=4, s=2, L=4 are approximately:
+# P1 ≈ 146, P2 ≈ 2341, P3 ≈ 37449, P4 ≈ 599186
+# Using one point before the first step, three log-midpoints between steps,
+# and one point after the fourth step gives the following explicit sizes:
+P_STEPS=(146 2341 37449 599186)
+TRAIN_SIZES=(
+  64
+  128
+  640
+  9344
+  149760
+  2396800
+  5000000
+)
+PLATEAU_FLOAT="36.571429 585.142857 9362.285714 149796.571429 2396745.142857"
+P_STEPS_FLOAT="146.285714 2340.571429 37449.142857 599186.285714"
+
+ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
+JOB_ID="${PBS_JOBID:-no_jobid}"
+HOSTNAME_NOW="$(hostname)"
+START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$REPO_DIR/pbs_logs"
+cd "$REPO_DIR"
+
+if [ "$ARRAY_INDEX" -ge "${#TRAIN_SIZES[@]}" ]; then
+    echo "[ERROR] PBS_ARRAY_INDEX=$ARRAY_INDEX out of range for TRAIN_SIZES" >&2
+    exit 1
+fi
+
+# Modules / environment
+if command -v module >/dev/null 2>&1; then
+    module purge || true
+fi
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export MKL_INTERFACE_LAYER="${MKL_INTERFACE_LAYER:-GNU}"
+
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+else
+    source activate "$CONDA_ENV_NAME"
+fi
+
+set -u
+
+# Older PyTorch builds may not like UUID-form CUDA_VISIBLE_DEVICES.
+ORIG_CVD="${CUDA_VISIBLE_DEVICES:-unset}"
+if [[ "${ORIG_CVD}" == GPU-* ]]; then
+    GPU_INDEX_FROM_UUID="$($PYTHON_BIN - <<'PY'
+import os, subprocess
+uuid = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+out = subprocess.check_output(
+    ['nvidia-smi', '--query-gpu=index,uuid', '--format=csv,noheader'],
+    text=True,
+)
+for line in out.splitlines():
+    idx, full_uuid = [x.strip() for x in line.split(',')]
+    if full_uuid == uuid or full_uuid.startswith(uuid):
+        print(idx)
+        break
+PY
+)"
+    if [ -n "$GPU_INDEX_FROM_UUID" ]; then
+        export CUDA_VISIBLE_DEVICES="$GPU_INDEX_FROM_UUID"
+    fi
+fi
+
+TRAIN_SIZE="${TRAIN_SIZES[$ARRAY_INDEX]}"
+ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}.log"
+
+{
+    echo "[START] $START_TS"
+    echo "[INFO] hostname=$HOSTNAME_NOW"
+    echo "[INFO] repo_dir=$REPO_DIR"
+    echo "[INFO] run_script=$RUN_SCRIPT"
+    echo "[INFO] data_root=$DATA_ROOT"
+    echo "[INFO] run_name=$RUN_NAME"
+    echo "[INFO] output_dir=$OUTPUT_DIR"
+    echo "[INFO] array_index=$ARRAY_INDEX"
+    echo "[INFO] train_size=$TRAIN_SIZE"
+    echo "[INFO] test_size=$TEST_SIZE"
+    echo "[INFO] batch_size=$BATCH_SIZE"
+    echo "[INFO] init_scale=$INIT_SCALE"
+    echo "[INFO] max_epochs=$MAX_EPOCHS"
+    echo "[INFO] seed_rules=$SEED_RULES"
+    echo "[INFO] seed_sample=$SEED_SAMPLE"
+    echo "[INFO] seed_model=$SEED_MODEL"
+    echo "[INFO] device=$DEVICE"
+    echo "[INFO] conda_env_name=$CONDA_ENV_NAME"
+    echo "[INFO] python_bin=$PYTHON_BIN"
+    echo "[INFO] which_python=$(command -v "$PYTHON_BIN" || true)"
+    echo "[INFO] python_version=$($PYTHON_BIN --version 2>&1 || true)"
+    echo "[INFO] orig_cuda_visible_devices=$ORIG_CVD"
+    echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    echo "[INFO] RHM params: v=$NUM_FEATURES n=$NUM_CLASSES m=$NUM_SYNONYMS s=$TUPLE_SIZE L=$NUM_LAYERS num_tokens=$NUM_TOKENS"
+    echo "[INFO] Transformer params: depth=$DEPTH num_heads=$NUM_HEADS embedding_dim=$EMBEDDING_DIM lr=$LR scheduler_time=$SCHEDULER_TIME"
+    echo "[INFO] theoretical_P_steps=${P_STEPS[*]}"
+    echo "[INFO] theoretical_P_steps_float=$P_STEPS_FLOAT"
+    echo "[INFO] plateau_midpoints_float=$PLATEAU_FLOAT"
+    echo "[INFO] explicit_train_sizes=${TRAIN_SIZES[*]}"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "[INFO] nvidia-smi:"
+        nvidia-smi || true
+    fi
+    echo "[INFO] torch_cuda_probe:"
+    $PYTHON_BIN - <<'PY' || true
+import torch
+print('torch_version =', torch.__version__)
+print('cuda_runtime =', torch.version.cuda)
+print('cuda_available =', torch.cuda.is_available())
+print('cuda_device_count =', torch.cuda.device_count())
+if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+    print('cuda_device_0 =', torch.cuda.get_device_name(0))
+PY
+} | tee -a "$ARRAY_LOG"
+
+if [ ! -f "$RUN_SCRIPT" ]; then
+    echo "[ERROR] Missing run script: $RUN_SCRIPT" | tee -a "$ARRAY_LOG"
+    exit 1
+fi
+
+CMD=(
+    "$PYTHON_BIN" -u "$RUN_SCRIPT"
+    --repo_dir "$REPO_DIR"
+    --output_dir "$OUTPUT_DIR"
+    --python_bin "$PYTHON_BIN"
+    --device "$DEVICE"
+    --train_size "$TRAIN_SIZE"
+    --test_size "$TEST_SIZE"
+    --num_features "$NUM_FEATURES"
+    --num_classes "$NUM_CLASSES"
+    --num_synonyms "$NUM_SYNONYMS"
+    --tuple_size "$TUPLE_SIZE"
+    --num_layers "$NUM_LAYERS"
+    --num_tokens "$NUM_TOKENS"
+    --depth "$DEPTH"
+    --num_heads "$NUM_HEADS"
+    --embedding_dim "$EMBEDDING_DIM"
+    --lr "$LR"
+    --scheduler_time "$SCHEDULER_TIME"
+    --batch_size "$BATCH_SIZE"
+    --init_scale "$INIT_SCALE"
+    --max_epochs "$MAX_EPOCHS"
+    --print_freq "$PRINT_FREQ"
+    --save_freq "$SAVE_FREQ"
+    --loss_threshold "$LOSS_THRESHOLD"
+    --seed_rules "$SEED_RULES"
+    --seed_sample "$SEED_SAMPLE"
+    --seed_model "$SEED_MODEL"
+    --tag "$TAG"
+)
+
+{
+    echo "[CMD] ${CMD[*]}"
+    echo "[RUN] launching L4 uniform-RHM point P=${TRAIN_SIZE}"
+} | tee -a "$ARRAY_LOG"
+
+"${CMD[@]}" 2>&1 | tee -a "$ARRAY_LOG"
+RET=$?
+
+END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+echo "[END] $END_TS return_code=$RET" | tee -a "$ARRAY_LOG"
+
+exit $RET

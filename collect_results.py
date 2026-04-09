@@ -64,13 +64,19 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
     if len(dyn) == 0:
         return {
             time_name: np.array([], dtype=int),
+
             "trainloss": np.array([], dtype=float),
+            "trainacc": np.array([], dtype=float),
+            "trainerr": np.array([], dtype=float),
+
             "testloss": np.array([], dtype=float),
             "testacc": np.array([], dtype=float),
             "err": np.array([], dtype=float),
+
             "spectral": np.array([], dtype=float),
             "spectral_no_qk": np.array([], dtype=float),
             "l2": np.array([], dtype=float),
+
             "margin_min": np.array([], dtype=float),
             "margin_mean": np.array([], dtype=float),
             "margin_max": np.array([], dtype=float),
@@ -85,10 +91,27 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
     )
 
     trainloss = np.array([d["trainloss"] for d in dyn], dtype=float)
+
+    # Optional train accuracy/error support:
+    # if trainacc is not present in raw files, these become NaN and propagate cleanly.
+    trainacc = np.array([d.get("trainacc", np.nan) for d in dyn], dtype=float)
+    trainerr = np.array(
+        [
+            d.get(
+                "trainerr",
+                (1.0 - d["trainacc"]) if ("trainacc" in d and np.isfinite(d["trainacc"])) else np.nan
+            )
+            for d in dyn
+        ],
+        dtype=float,
+    )
+
     testloss = np.array([d["testloss"] for d in dyn], dtype=float)
     testacc = np.array([d["testacc"] for d in dyn], dtype=float)
-
-    err = 1.0 - testacc
+    err = np.array(
+        [d.get("err", 1.0 - d["testacc"]) for d in dyn],
+        dtype=float
+    )
 
     spectral = np.array([d.get(SPECTRAL_KEY, np.nan) for d in dyn], dtype=float)
     spectral_no_qk = np.array([d.get(SPECTRAL_NO_QK_KEY, np.nan) for d in dyn], dtype=float)
@@ -101,13 +124,19 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
 
     return {
         time_name: times,
+
         "trainloss": trainloss,
+        "trainacc": trainacc,
+        "trainerr": trainerr,
+
         "testloss": testloss,
         "testacc": testacc,
         "err": err,
+
         "spectral": spectral,
         "spectral_no_qk": spectral_no_qk,
         "l2": l2,
+
         "margin_min": margin_min,
         "margin_mean": margin_mean,
         "margin_max": margin_max,
@@ -193,6 +222,8 @@ def main():
             # epoch-level dynamics
             "epochs": dyn["epochs"],
             "trainloss": dyn["trainloss"],
+            "trainacc": dyn["trainacc"],
+            "trainerr": dyn["trainerr"],
             "testloss": dyn["testloss"],
             "testacc": dyn["testacc"],
             "err": dyn["err"],
@@ -207,6 +238,8 @@ def main():
             # timestep-level dynamics (optional)
             "timesteps": dyn_timestep["timesteps"],
             "trainloss_timestep": dyn_timestep["trainloss"],
+            "trainacc_timestep": dyn_timestep["trainacc"],
+            "trainerr_timestep": dyn_timestep["trainerr"],
             "testloss_timestep": dyn_timestep["testloss"],
             "testacc_timestep": dyn_timestep["testacc"],
             "err_timestep": dyn_timestep["err"],
@@ -262,6 +295,9 @@ def main():
     # Raw epoch arrays: (nP, max_seeds, nT)
     # -----------------------------
     trainloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    trainacc_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    trainerr_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+
     testloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
     testacc_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
 
@@ -278,6 +314,9 @@ def main():
     # Raw timestep arrays: (nP, max_seeds, nTs)
     # -----------------------------
     trainloss_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
+    trainacc_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
+    trainerr_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
+
     testloss_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
     testacc_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
 
@@ -322,6 +361,9 @@ def main():
             for local_i, ep in enumerate(e["epochs"]):
                 j = epoch_to_idx[int(ep)]
                 trainloss_raw[iP, iseed, j] = e["trainloss"][local_i]
+                trainacc_raw[iP, iseed, j] = e["trainacc"][local_i]
+                trainerr_raw[iP, iseed, j] = e["trainerr"][local_i]
+
                 testloss_raw[iP, iseed, j] = e["testloss"][local_i]
                 testacc_raw[iP, iseed, j] = e["testacc"][local_i]
 
@@ -338,6 +380,9 @@ def main():
             for local_i, ts in enumerate(e["timesteps"]):
                 j = timestep_to_idx[int(ts)]
                 trainloss_timestep_raw[iP, iseed, j] = e["trainloss_timestep"][local_i]
+                trainacc_timestep_raw[iP, iseed, j] = e["trainacc_timestep"][local_i]
+                trainerr_timestep_raw[iP, iseed, j] = e["trainerr_timestep"][local_i]
+
                 testloss_timestep_raw[iP, iseed, j] = e["testloss_timestep"][local_i]
                 testacc_timestep_raw[iP, iseed, j] = e["testacc_timestep"][local_i]
 
@@ -363,6 +408,9 @@ def main():
     # Aggregate epoch arrays over seed axis=1
     # -----------------------------
     trainloss_mean, trainloss_std, trainloss_n = nanmean_std_with_flag_optional(trainloss_raw)
+    trainacc_mean, trainacc_std, trainacc_n = nanmean_std_with_flag_optional(trainacc_raw)
+    trainerr_mean, trainerr_std, trainerr_n = nanmean_std_with_flag_optional(trainerr_raw)
+
     testloss_mean, testloss_std, testloss_n = nanmean_std_with_flag_optional(testloss_raw)
     testacc_mean, testacc_std, testacc_n = nanmean_std_with_flag_optional(testacc_raw)
     err_mean, err_std, err_n = nanmean_std_with_flag_optional(err_raw)
@@ -380,6 +428,9 @@ def main():
     # Aggregate timestep arrays over seed axis=1
     # -----------------------------
     trainloss_timestep_mean, trainloss_timestep_std, trainloss_timestep_n = nanmean_std_with_flag_optional(trainloss_timestep_raw)
+    trainacc_timestep_mean, trainacc_timestep_std, trainacc_timestep_n = nanmean_std_with_flag_optional(trainacc_timestep_raw)
+    trainerr_timestep_mean, trainerr_timestep_std, trainerr_timestep_n = nanmean_std_with_flag_optional(trainerr_timestep_raw)
+
     testloss_timestep_mean, testloss_timestep_std, testloss_timestep_n = nanmean_std_with_flag_optional(testloss_timestep_raw)
     testacc_timestep_mean, testacc_timestep_std, testacc_timestep_n = nanmean_std_with_flag_optional(testacc_timestep_raw)
     err_timestep_mean, err_timestep_std, err_timestep_n = nanmean_std_with_flag_optional(err_timestep_raw)
@@ -403,6 +454,9 @@ def main():
     # Seed-resolved arrays: shape (nP, nT, max_seeds)
     # -----------------------------
     trainloss_seeds = np.transpose(trainloss_raw, (0, 2, 1))
+    trainacc_seeds = np.transpose(trainacc_raw, (0, 2, 1))
+    trainerr_seeds = np.transpose(trainerr_raw, (0, 2, 1))
+
     testloss_seeds = np.transpose(testloss_raw, (0, 2, 1))
     testacc_seeds = np.transpose(testacc_raw, (0, 2, 1))
     err_seeds = np.transpose(err_raw, (0, 2, 1))
@@ -420,6 +474,9 @@ def main():
     # Timestep seed-resolved arrays: shape (nP, nTs, max_seeds)
     # -----------------------------
     trainloss_seeds_timestep = np.transpose(trainloss_timestep_raw, (0, 2, 1))
+    trainacc_seeds_timestep = np.transpose(trainacc_timestep_raw, (0, 2, 1))
+    trainerr_seeds_timestep = np.transpose(trainerr_timestep_raw, (0, 2, 1))
+
     testloss_seeds_timestep = np.transpose(testloss_timestep_raw, (0, 2, 1))
     testacc_seeds_timestep = np.transpose(testacc_timestep_raw, (0, 2, 1))
     err_seeds_timestep = np.transpose(err_timestep_raw, (0, 2, 1))
@@ -455,6 +512,9 @@ def main():
 
         # raw epoch curves per seed
         "trainloss_raw": trainloss_raw,             # shape (nP, max_seeds, nT)
+        "trainacc_raw": trainacc_raw,
+        "trainerr_raw": trainerr_raw,
+
         "testloss_raw": testloss_raw,
         "testacc_raw": testacc_raw,
         "err_raw": err_raw,
@@ -470,6 +530,9 @@ def main():
 
         # raw timestep curves per seed
         "trainloss_timestep_raw": trainloss_timestep_raw,   # shape (nP, max_seeds, nTs)
+        "trainacc_timestep_raw": trainacc_timestep_raw,
+        "trainerr_timestep_raw": trainerr_timestep_raw,
+
         "testloss_timestep_raw": testloss_timestep_raw,
         "testacc_timestep_raw": testacc_timestep_raw,
         "err_timestep_raw": err_timestep_raw,
@@ -485,6 +548,9 @@ def main():
 
         # seed-resolved epoch arrays
         "trainloss_seeds": trainloss_seeds,               # shape (nP, nT, max_seeds)
+        "trainacc_seeds": trainacc_seeds,
+        "trainerr_seeds": trainerr_seeds,
+
         "testloss_seeds": testloss_seeds,
         "testacc_seeds": testacc_seeds,
         "err_seeds": err_seeds,
@@ -500,6 +566,9 @@ def main():
 
         # seed-resolved timestep arrays
         "trainloss_seeds_timestep": trainloss_seeds_timestep,   # shape (nP, nTs, max_seeds)
+        "trainacc_seeds_timestep": trainacc_seeds_timestep,
+        "trainerr_seeds_timestep": trainerr_seeds_timestep,
+
         "testloss_seeds_timestep": testloss_seeds_timestep,
         "testacc_seeds_timestep": testacc_seeds_timestep,
         "err_seeds_timestep": err_seeds_timestep,
@@ -517,6 +586,14 @@ def main():
         "trainloss_mean": trainloss_mean,           # shape (nP, nT)
         "trainloss_std": trainloss_std,
         "trainloss_n": trainloss_n,
+
+        "trainacc_mean": trainacc_mean,
+        "trainacc_std": trainacc_std,
+        "trainacc_n": trainacc_n,
+
+        "trainerr_mean": trainerr_mean,
+        "trainerr_std": trainerr_std,
+        "trainerr_n": trainerr_n,
 
         "testloss_mean": testloss_mean,
         "testloss_std": testloss_std,
@@ -562,6 +639,14 @@ def main():
         "trainloss_timestep_mean": trainloss_timestep_mean,   # shape (nP, nTs)
         "trainloss_timestep_std": trainloss_timestep_std,
         "trainloss_timestep_n": trainloss_timestep_n,
+
+        "trainacc_timestep_mean": trainacc_timestep_mean,
+        "trainacc_timestep_std": trainacc_timestep_std,
+        "trainacc_timestep_n": trainacc_timestep_n,
+
+        "trainerr_timestep_mean": trainerr_timestep_mean,
+        "trainerr_timestep_std": trainerr_timestep_std,
+        "trainerr_timestep_n": trainerr_timestep_n,
 
         "testloss_timestep_mean": testloss_timestep_mean,
         "testloss_timestep_std": testloss_timestep_std,
@@ -640,6 +725,8 @@ def main():
     print(f"num_seeds per P: {num_seeds.tolist()}")
 
     print(f"trainloss_seeds shape: {trainloss_seeds.shape}")
+    print(f"trainacc_seeds shape: {trainacc_seeds.shape}")
+    print(f"trainerr_seeds shape: {trainerr_seeds.shape}")
     print(f"testloss_seeds shape: {testloss_seeds.shape}")
     print(f"testacc_seeds shape: {testacc_seeds.shape}")
     print(f"err_seeds shape: {err_seeds.shape}")
@@ -652,6 +739,8 @@ def main():
     print(f"margin_std_seeds shape: {margin_std_seeds.shape}")
 
     print(f"trainloss_seeds_timestep shape: {trainloss_seeds_timestep.shape}")
+    print(f"trainacc_seeds_timestep shape: {trainacc_seeds_timestep.shape}")
+    print(f"trainerr_seeds_timestep shape: {trainerr_seeds_timestep.shape}")
     print(f"testloss_seeds_timestep shape: {testloss_seeds_timestep.shape}")
     print(f"testacc_seeds_timestep shape: {testacc_seeds_timestep.shape}")
     print(f"err_seeds_timestep shape: {err_seeds_timestep.shape}")
