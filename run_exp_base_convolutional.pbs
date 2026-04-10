@@ -1,81 +1,69 @@
 #!/bin/bash
-#PBS -N rhm_L4_uniform_mid
-#PBS -q gpuq-longrun
-#PBS -J 0-3
-#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
-#PBS -l walltime=200:00:00
+#PBS -N rhm_conv
+#PBS -q gpuq
+#PBS -J 0-4
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l walltime=8:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
 set -eo pipefail
 
 REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
-RUN_SCRIPT="${RUN_SCRIPT:-$REPO_DIR/run_rhm_transformer_single.py}"
+RUN_SCRIPT="${RUN_SCRIPT:-$REPO_DIR/run_rhm_transformer_single_convolutional.py}"
 
 DATA_ROOT="${DATA_ROOT:-$REPO_DIR/data}"
-RUN_NAME="${RUN_NAME:-rhm_L4_uniform_midpoints}"
+RUN_NAME="${RUN_NAME:-rhm_bluecurve_convolutional_default}"
 OUTPUT_DIR="${OUTPUT_DIR:-$DATA_ROOT/$RUN_NAME}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-rhm}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda}"
-TAG="${TAG:-paper_L4_s2_v32_m4_midpoints}"
+TAG="${TAG:-paper_L3_s2_v32_m8_convolutional_bluecurve}"
 
-# Fixed seeds: one realization only
+# Convolutional model selection
+MODEL="${MODEL:-hcnn}"
+WIDTH="${WIDTH:-256}"
+FILTER_SIZE="${FILTER_SIZE:-2}"
+DEPTH="${DEPTH:-3}"
+BIAS="${BIAS:-0}"
+
+# Fixed seeds: one realisation only
 SEED_RULES="${SEED_RULES:-0}"
 SEED_SAMPLE="${SEED_SAMPLE:-0}"
 SEED_MODEL="${SEED_MODEL:-0}"
 
-# -----------------------------
-# RHM: uniform unambiguous rules
-# -----------------------------
-# Chosen parameters:
-# - v=32, s=2, L=4, m=4
-# - uniform rules are what the dataset generator implements
-# - num_tokens = s^L = 16
-# - m=4 keeps the four theoretical step scales in a reachable range
-# - unambiguity still holds because m <= v^(s-1) = 32
+# Same RHM setting as the blue curve run
 NUM_FEATURES="${NUM_FEATURES:-32}"
 NUM_CLASSES="${NUM_CLASSES:-32}"
-NUM_SYNONYMS="${NUM_SYNONYMS:-4}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-8}"
 TUPLE_SIZE="${TUPLE_SIZE:-2}"
-NUM_LAYERS="${NUM_LAYERS:-4}"
-NUM_TOKENS="${NUM_TOKENS:-16}"
+NUM_LAYERS="${NUM_LAYERS:-3}"
+NUM_TOKENS="${NUM_TOKENS:-8}"
 
-# -----------------------------
-# Transformer matched to the RHM depth
-# -----------------------------
-DEPTH="${DEPTH:-4}"
-NUM_HEADS="${NUM_HEADS:-16}"
-EMBEDDING_DIM="${EMBEDDING_DIM:-512}"
-LR="${LR:-2e-4}"
-SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
-
-# Training / logging
+# CNN-style training defaults closer to Appendix A.1
 TEST_SIZE="${TEST_SIZE:-32768}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
-INIT_SCALE="${INIT_SCALE:-0.8}"
+ACCUMULATION="${ACCUMULATION:-0}"
+SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
+INIT_SCALE="${INIT_SCALE:-0.5}"
 MAX_EPOCHS="${MAX_EPOCHS:-128}"
-PRINT_FREQ="${PRINT_FREQ:-1}"
-SAVE_FREQ="${SAVE_FREQ:-25}"
-LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
+LR="${LR:-0.01}"
+OPTIM="${OPTIM:-sgd}"
+SCHEDULER="${SCHEDULER:-cosine}"
+SCHEDULER_TIME="${SCHEDULER_TIME:-100}"
 
-# ---------------------------------------------------------------
-# Explicit train sizes (5 plateau-centered values, rounded to 128)
-# ---------------------------------------------------------------
-# Theoretical steps for v=32, m=4, s=2, L=4 are approximately:
-# P1 ≈ 146, P2 ≈ 2341, P3 ≈ 37449, P4 ≈ 599186
-# Using one point before the first step, three log-midpoints between steps,
-# and one point after the fourth step gives the following explicit sizes:
-P_STEPS=(146 2341 37449 599186)
+A="${A:--1}"
+COMPUTE_MARGINS="${COMPUTE_MARGINS:-false}"
+MARGIN_STATS_MAX_SAMPLES="${MARGIN_STATS_MAX_SAMPLES:-4096}"
+
 TRAIN_SIZES=(
-  146
-  2341
-  37449
-  599186
+  2048
+  8192
+  32768
+  131072
+  524288
 )
-PLATEAU_FLOAT="36.571429 585.142857 9362.285714 149796.571429 2396745.142857"
-P_STEPS_FLOAT="146.285714 2340.571429 37449.142857 599186.285714"
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
 JOB_ID="${PBS_JOBID:-no_jobid}"
@@ -91,12 +79,14 @@ if [ "$ARRAY_INDEX" -ge "${#TRAIN_SIZES[@]}" ]; then
     exit 1
 fi
 
-# Modules / environment
+TRAIN_SIZE="${TRAIN_SIZES[$ARRAY_INDEX]}"
+ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}.log"
+
 if command -v module >/dev/null 2>&1; then
     module purge || true
 fi
 
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export MKL_INTERFACE_LAYER="${MKL_INTERFACE_LAYER:-GNU}"
@@ -110,7 +100,6 @@ fi
 
 set -u
 
-# Older PyTorch builds may not like UUID-form CUDA_VISIBLE_DEVICES.
 ORIG_CVD="${CUDA_VISIBLE_DEVICES:-unset}"
 if [[ "${ORIG_CVD}" == GPU-* ]]; then
     GPU_INDEX_FROM_UUID="$($PYTHON_BIN - <<'PY'
@@ -132,9 +121,6 @@ PY
     fi
 fi
 
-TRAIN_SIZE="${TRAIN_SIZES[$ARRAY_INDEX]}"
-ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}.log"
-
 {
     echo "[START] $START_TS"
     echo "[INFO] hostname=$HOSTNAME_NOW"
@@ -147,6 +133,16 @@ ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}
     echo "[INFO] train_size=$TRAIN_SIZE"
     echo "[INFO] test_size=$TEST_SIZE"
     echo "[INFO] batch_size=$BATCH_SIZE"
+    echo "[INFO] model=$MODEL"
+    echo "[INFO] width=$WIDTH"
+    echo "[INFO] filter_size=$FILTER_SIZE"
+    echo "[INFO] depth=$DEPTH"
+    echo "[INFO] lr=$LR"
+    echo "[INFO] optim=$OPTIM"
+    echo "[INFO] scheduler=$SCHEDULER"
+    echo "[INFO] scheduler_time=$SCHEDULER_TIME"
+    echo "[INFO] accumulation=$ACCUMULATION"
+    echo "[INFO] save_trainstep_epochs=${SAVE_TRAINSTEP_EPOCHS:-None}"
     echo "[INFO] init_scale=$INIT_SCALE"
     echo "[INFO] max_epochs=$MAX_EPOCHS"
     echo "[INFO] seed_rules=$SEED_RULES"
@@ -160,11 +156,6 @@ ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}
     echo "[INFO] orig_cuda_visible_devices=$ORIG_CVD"
     echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
     echo "[INFO] RHM params: v=$NUM_FEATURES n=$NUM_CLASSES m=$NUM_SYNONYMS s=$TUPLE_SIZE L=$NUM_LAYERS num_tokens=$NUM_TOKENS"
-    echo "[INFO] Transformer params: depth=$DEPTH num_heads=$NUM_HEADS embedding_dim=$EMBEDDING_DIM lr=$LR scheduler_time=$SCHEDULER_TIME"
-    echo "[INFO] theoretical_P_steps=${P_STEPS[*]}"
-    echo "[INFO] theoretical_P_steps_float=$P_STEPS_FLOAT"
-    echo "[INFO] plateau_midpoints_float=$PLATEAU_FLOAT"
-    echo "[INFO] explicit_train_sizes=${TRAIN_SIZES[*]}"
     if command -v nvidia-smi >/dev/null 2>&1; then
         echo "[INFO] nvidia-smi:"
         nvidia-smi || true
@@ -200,26 +191,57 @@ CMD=(
     --tuple_size "$TUPLE_SIZE"
     --num_layers "$NUM_LAYERS"
     --num_tokens "$NUM_TOKENS"
+    --model "$MODEL"
     --depth "$DEPTH"
-    --num_heads "$NUM_HEADS"
-    --embedding_dim "$EMBEDDING_DIM"
+    --width "$WIDTH"
+    --filter_size "$FILTER_SIZE"
     --lr "$LR"
+    --optim "$OPTIM"
+    --scheduler "$SCHEDULER"
     --scheduler_time "$SCHEDULER_TIME"
     --batch_size "$BATCH_SIZE"
     --init_scale "$INIT_SCALE"
     --max_epochs "$MAX_EPOCHS"
-    --print_freq "$PRINT_FREQ"
-    --save_freq "$SAVE_FREQ"
-    --loss_threshold "$LOSS_THRESHOLD"
+    --print_freq 1
+    --save_freq 25
+    --loss_threshold 1e-3
     --seed_rules "$SEED_RULES"
     --seed_sample "$SEED_SAMPLE"
     --seed_model "$SEED_MODEL"
     --tag "$TAG"
 )
 
+case "${COMPUTE_MARGINS,,}" in
+    true|1|yes|y)
+        CMD+=(--compute_margin_stats --margin_stats_max_samples "$MARGIN_STATS_MAX_SAMPLES")
+        ;;
+    false|0|no|n)
+        ;;
+    *)
+        echo "[ERROR] Invalid COMPUTE_MARGINS value: $COMPUTE_MARGINS" | tee -a "$ARRAY_LOG"
+        exit 1
+        ;;
+esac
+
+if [ "$ACCUMULATION" = "1" ]; then
+    CMD+=(--accumulation)
+fi
+
+if [ -n "$SAVE_TRAINSTEP_EPOCHS" ]; then
+    CMD+=(--save_trainstep_epochs "$SAVE_TRAINSTEP_EPOCHS")
+fi
+
+if [ "$BIAS" = "1" ]; then
+    CMD+=(--bias)
+fi
+
+if [ -n "$A" ]; then
+    CMD+=(--a "$A")
+fi
+
 {
     echo "[CMD] ${CMD[*]}"
-    echo "[RUN] launching L4 uniform-RHM point P=${TRAIN_SIZE}"
+    echo "[RUN] launching convolutional blue-curve point P=${TRAIN_SIZE}"
 } | tee -a "$ARRAY_LOG"
 
 "${CMD[@]}" 2>&1 | tee -a "$ARRAY_LOG"
