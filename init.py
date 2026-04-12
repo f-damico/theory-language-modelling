@@ -125,6 +125,7 @@ def init_data(args):
         shuffle=True,
         num_workers=0,
         generator=train_generator,
+        drop_last=False,
     )
 
     if args.test_size:

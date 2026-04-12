@@ -21,20 +21,6 @@ import sys
 from pathlib import Path
 
 
-def choose_batch_size(train_size: int, requested_batch_size: int) -> int:
-    """Return a batch size <= train_size that divides train_size."""
-    if requested_batch_size >= train_size:
-        return train_size
-
-    batch_size = requested_batch_size
-    while batch_size > 1 and train_size % batch_size != 0:
-        batch_size //= 2
-
-    if batch_size <= 0:
-        return 1
-    return batch_size
-
-
 def parse_args() -> argparse.Namespace:
     repo_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Run one paper-style RHM convolutional training")
@@ -116,7 +102,6 @@ def main() -> None:
 
     depth = args.depth if args.depth is not None else args.num_layers
     filter_size = args.filter_size if args.filter_size is not None else args.tuple_size
-    batch_size = choose_batch_size(args.train_size, args.batch_size)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     outname = args.output_dir / (
@@ -138,7 +123,7 @@ def main() -> None:
         "--seed_rules", str(args.seed_rules),
         "--num_tokens", str(args.num_tokens),
         "--train_size", str(args.train_size),
-        "--batch_size", str(batch_size),
+        "--batch_size", str(args.batch_size),
         "--init_scale", str(args.init_scale),
         "--test_size", str(args.test_size),
         "--seed_sample", str(args.seed_sample),
@@ -184,7 +169,7 @@ def main() -> None:
     print(f"[INFO] output_dir={args.output_dir}")
     print(f"[INFO] outname={outname}")
     print(f"[INFO] model={args.model}")
-    print(f"[INFO] effective_batch_size={batch_size}")
+    print(f"[INFO] batch_size={args.batch_size}")
     print("[CMD] " + " ".join(cmd))
 
     env = dict(**__import__("os").environ)

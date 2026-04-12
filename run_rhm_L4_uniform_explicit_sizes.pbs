@@ -1,8 +1,8 @@
 #!/bin/bash
-#PBS -N rhm_L4_uniform_mid
+#PBS -N rhm_L4_uniform
 #PBS -q gpuq-longrun
-#PBS -J 0-3
-#PBS -l select=1:ncpus=8:ngpus=1:mem=32gb
+#PBS -J 0-15
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb
 #PBS -l walltime=200:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
@@ -48,7 +48,7 @@ NUM_TOKENS="${NUM_TOKENS:-16}"
 DEPTH="${DEPTH:-4}"
 NUM_HEADS="${NUM_HEADS:-16}"
 EMBEDDING_DIM="${EMBEDDING_DIM:-512}"
-LR="${LR:-2e-4}"
+LR="${LR:-1e-4}"
 SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
 
 # Training / logging
@@ -69,10 +69,22 @@ LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
 # and one point after the fourth step gives the following explicit sizes:
 P_STEPS=(146 2341 37449 599186)
 TRAIN_SIZES=(
+  37
+  74
   146
+  292
+  585
+  1170
   2341
+  4682
+  9362
+  18724
   37449
+  74898
+  149796
+  299591
   599186
+  2396745
 )
 PLATEAU_FLOAT="36.571429 585.142857 9362.285714 149796.571429 2396745.142857"
 P_STEPS_FLOAT="146.285714 2340.571429 37449.142857 599186.285714"

@@ -30,7 +30,7 @@ def run( args):
     if (args.batch_size >= args.train_size):
         args.batch_size = args.train_size
     
-    assert (args.train_size%args.batch_size)==0, 'batch_size must divide train_size!'
+    #assert (args.train_size%args.batch_size)==0, 'batch_size must divide train_size!'
 
     if args.accumulation:
         accumulation = args.train_size // args.batch_size
