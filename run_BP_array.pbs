@@ -1,0 +1,223 @@
+#!/bin/bash
+#PBS -N BP_array
+#PBS -q workq
+#PBS -J 0-49
+#PBS -l select=1:ncpus=1:mem=2gb
+#PBS -l walltime=8:00:00
+#PBS -j oe
+#PBS -o pbs_logs/
+
+set -eo pipefail
+
+REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
+RUN_NAME="${RUN_NAME:?RUN_NAME must be provided with qsub -v RUN_NAME=...}"
+BP_MODE="${BP_MODE:-local}"   # local or global
+
+LOCAL_SCRIPT="${LOCAL_SCRIPT:-$REPO_DIR/BP/run_local_budget.py}"
+GLOBAL_SCRIPT="${GLOBAL_SCRIPT:-$REPO_DIR/BP/run_global_budget.py}"
+
+case "$BP_MODE" in
+    local)
+        RUN_SCRIPT="$LOCAL_SCRIPT"
+        ;;
+    global)
+        RUN_SCRIPT="$GLOBAL_SCRIPT"
+        ;;
+    *)
+        echo "[ERROR] BP_MODE must be 'local' or 'global', got: $BP_MODE" >&2
+        exit 1
+        ;;
+esac
+
+DATA_ROOT="${DATA_ROOT:-$REPO_DIR/data}"
+RAW_ROOT="${RAW_ROOT:-$DATA_ROOT/BP_raw}"
+OUTPUT_DIR="${RAW_ROOT}/${RUN_NAME}"
+
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-theory-language-modelling}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+NUM_FEATURES="${NUM_FEATURES:-32}"
+NUM_CLASSES="${NUM_CLASSES:-32}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-8}"
+TUPLE_SIZE="${TUPLE_SIZE:-2}"
+NUM_LAYERS="${NUM_LAYERS:-3}"
+TRAIN_SIZE="${TRAIN_SIZE:-32768}"
+TEST_SIZE="${TEST_SIZE:-2048}"
+MAX_TEST_SAMPLES="${MAX_TEST_SAMPLES:-}"
+
+ZIPF="${ZIPF:-}"
+LAYER="${LAYER:-}"
+LAST_LAYER_POWERLAW_A="${LAST_LAYER_POWERLAW_A:-}"
+REPLACEMENT="${REPLACEMENT:-auto}"   # auto / true / false
+
+LAMBDA_VALUES="${LAMBDA_VALUES:-}"
+LAMBDA_LOG10_MIN="${LAMBDA_LOG10_MIN:--2}"
+LAMBDA_LOG10_MAX="${LAMBDA_LOG10_MAX:-2}"
+LAMBDA_NUM="${LAMBDA_NUM:-25}"
+INCLUDE_ZERO="${INCLUDE_ZERO:-true}"
+
+FORCE_RERUN="${FORCE_RERUN:-false}"
+
+SEED_RULES_LIST=(1 2 3 4 5)
+SEED_SAMPLE_LIST=(1 2 3 4 5 6 7 8 9 10)
+
+ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
+JOB_ID="${PBS_JOBID:-no_jobid}"
+HOSTNAME_NOW="$(hostname)"
+START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+
+N_SR=${#SEED_RULES_LIST[@]}
+N_SS=${#SEED_SAMPLE_LIST[@]}
+N_TOTAL=$((N_SR * N_SS))
+
+if [ "$ARRAY_INDEX" -ge "$N_TOTAL" ]; then
+    echo "[ERROR] PBS_ARRAY_INDEX=$ARRAY_INDEX out of range, expected 0..$((N_TOTAL-1))" >&2
+    exit 1
+fi
+
+IDX_SR=$((ARRAY_INDEX / N_SS))
+IDX_SS=$((ARRAY_INDEX % N_SS))
+SEED_RULES="${SEED_RULES_LIST[$IDX_SR]}"
+SEED_SAMPLE="${SEED_SAMPLE_LIST[$IDX_SS]}"
+
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$REPO_DIR/pbs_logs"
+cd "$REPO_DIR"
+
+OUT_STEM="${BP_MODE}__sr$(printf '%03d' "$SEED_RULES")__ss$(printf '%03d' "$SEED_SAMPLE")"
+OUT_PREFIX="$OUTPUT_DIR/$OUT_STEM"
+ARRAY_LOG="$REPO_DIR/pbs_logs/${RUN_NAME}_${BP_MODE}_${JOB_ID}_idx_${ARRAY_INDEX}.log"
+
+if [ -f "${OUT_PREFIX}.npz" ]; then
+    case "${FORCE_RERUN,,}" in
+        true|1|yes|y)
+            ;;
+        *)
+            echo "[SKIP] Output already exists: ${OUT_PREFIX}.npz" | tee -a "$ARRAY_LOG"
+            exit 0
+            ;;
+    esac
+fi
+
+if command -v module >/dev/null 2>&1; then
+    module purge || true
+fi
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export MKL_INTERFACE_LAYER="${MKL_INTERFACE_LAYER:-GNU}"
+
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+else
+    source activate "$CONDA_ENV_NAME"
+fi
+
+set -u
+
+CMD=(
+    "$PYTHON_BIN" -u "$RUN_SCRIPT"
+    --num_features "$NUM_FEATURES"
+    --num_classes "$NUM_CLASSES"
+    --num_synonyms "$NUM_SYNONYMS"
+    --tuple_size "$TUPLE_SIZE"
+    --num_layers "$NUM_LAYERS"
+    --train_size "$TRAIN_SIZE"
+    --test_size "$TEST_SIZE"
+    --seed_rules "$SEED_RULES"
+    --seed_sample "$SEED_SAMPLE"
+    --out_prefix "$OUT_PREFIX"
+    --no_plots
+)
+
+if [ -n "$MAX_TEST_SAMPLES" ]; then
+    CMD+=(--max_test_samples "$MAX_TEST_SAMPLES")
+fi
+
+if [ -n "$LAMBDA_VALUES" ]; then
+    CMD+=(--lambda_values "$LAMBDA_VALUES")
+else
+    CMD+=(--lambda_log10_min "$LAMBDA_LOG10_MIN" --lambda_log10_max "$LAMBDA_LOG10_MAX" --lambda_num "$LAMBDA_NUM")
+    case "${INCLUDE_ZERO,,}" in
+        true|1|yes|y)
+            CMD+=(--include_zero)
+            ;;
+    esac
+fi
+
+if [ -n "$ZIPF" ]; then
+    CMD+=(--zipf "$ZIPF")
+fi
+
+if [ -n "$LAYER" ]; then
+    CMD+=(--layer "$LAYER")
+fi
+
+if [ -n "$LAST_LAYER_POWERLAW_A" ]; then
+    CMD+=(--last_layer_powerlaw_a "$LAST_LAYER_POWERLAW_A")
+fi
+
+case "${REPLACEMENT,,}" in
+    true|1|yes|y)
+        CMD+=(--replacement)
+        ;;
+    false|0|no|n|auto|"")
+        ;;
+    *)
+        echo "[ERROR] Invalid REPLACEMENT value: $REPLACEMENT" | tee -a "$ARRAY_LOG"
+        exit 1
+        ;;
+esac
+
+{
+    echo "[START] $START_TS"
+    echo "[INFO] hostname=$HOSTNAME_NOW"
+    echo "[INFO] repo_dir=$REPO_DIR"
+    echo "[INFO] run_name=$RUN_NAME"
+    echo "[INFO] bp_mode=$BP_MODE"
+    echo "[INFO] run_script=$RUN_SCRIPT"
+    echo "[INFO] output_dir=$OUTPUT_DIR"
+    echo "[INFO] out_prefix=$OUT_PREFIX"
+    echo "[INFO] array_index=$ARRAY_INDEX"
+    echo "[INFO] seed_rules=$SEED_RULES"
+    echo "[INFO] seed_sample=$SEED_SAMPLE"
+    echo "[INFO] num_features=$NUM_FEATURES"
+    echo "[INFO] num_classes=$NUM_CLASSES"
+    echo "[INFO] num_synonyms=$NUM_SYNONYMS"
+    echo "[INFO] tuple_size=$TUPLE_SIZE"
+    echo "[INFO] num_layers=$NUM_LAYERS"
+    echo "[INFO] train_size=$TRAIN_SIZE"
+    echo "[INFO] test_size=$TEST_SIZE"
+    echo "[INFO] max_test_samples=${MAX_TEST_SAMPLES:-None}"
+    echo "[INFO] zipf=${ZIPF:-None}"
+    echo "[INFO] layer=${LAYER:-None}"
+    echo "[INFO] last_layer_powerlaw_a=${LAST_LAYER_POWERLAW_A:-None}"
+    echo "[INFO] replacement=$REPLACEMENT"
+    echo "[INFO] lambda_values=${LAMBDA_VALUES:-None}"
+    echo "[INFO] lambda_log10_min=$LAMBDA_LOG10_MIN"
+    echo "[INFO] lambda_log10_max=$LAMBDA_LOG10_MAX"
+    echo "[INFO] lambda_num=$LAMBDA_NUM"
+    echo "[INFO] include_zero=$INCLUDE_ZERO"
+    echo "[INFO] conda_env_name=$CONDA_ENV_NAME"
+    echo "[INFO] python_bin=$PYTHON_BIN"
+    echo "[INFO] which_python=$(command -v "$PYTHON_BIN" || true)"
+    echo "[INFO] python_version=$($PYTHON_BIN --version 2>&1 || true)"
+    echo "[CMD] ${CMD[*]}"
+} | tee -a "$ARRAY_LOG"
+
+if [ ! -f "$RUN_SCRIPT" ]; then
+    echo "[ERROR] Missing run script: $RUN_SCRIPT" | tee -a "$ARRAY_LOG"
+    exit 1
+fi
+
+"${CMD[@]}" 2>&1 | tee -a "$ARRAY_LOG"
+RET=$?
+
+END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+echo "[END] $END_TS return_code=$RET" | tee -a "$ARRAY_LOG"
+exit $RET

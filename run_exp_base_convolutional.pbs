@@ -1,8 +1,8 @@
 #!/bin/bash
 #PBS -N rhm_conv
 #PBS -q gpuq
-#PBS -J 0-4
-#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -J 0-8
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb
 #PBS -l walltime=8:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
@@ -58,11 +58,15 @@ COMPUTE_MARGINS="${COMPUTE_MARGINS:-false}"
 MARGIN_STATS_MAX_SAMPLES="${MARGIN_STATS_MAX_SAMPLES:-4096}"
 
 TRAIN_SIZES=(
-  2048
-  8192
-  32768
-  131072
-  524288
+  256
+  1024
+  4096
+  16384
+  65536
+  262144
+  1048576
+  2097152
+  4194304
 )
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
@@ -137,6 +141,7 @@ fi
     echo "[INFO] width=$WIDTH"
     echo "[INFO] filter_size=$FILTER_SIZE"
     echo "[INFO] depth=$DEPTH"
+    echo "[INFO] A=$A"
     echo "[INFO] lr=$LR"
     echo "[INFO] optim=$OPTIM"
     echo "[INFO] scheduler=$SCHEDULER"

@@ -44,7 +44,7 @@ MODEL="${MODEL:-hcnn}"
 DEPTH="${DEPTH:-4}"
 WIDTH="${WIDTH:-512}"
 FILTER_SIZE="${FILTER_SIZE:-2}"
-LR="${LR:-0.1}"
+LR="${LR:-0.01}"
 OPTIM="${OPTIM:-sgd}"
 SCHEDULER="${SCHEDULER:-cosine}"
 SCHEDULER_TIME="${SCHEDULER_TIME:-100}"
@@ -58,6 +58,8 @@ MAX_EPOCHS="${MAX_EPOCHS:-128}"
 PRINT_FREQ="${PRINT_FREQ:-1}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
+
+A="${A:--1}"
 
 TRAIN_SIZES=(
   37
@@ -144,6 +146,7 @@ ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}
     echo "[INFO] run_name=$RUN_NAME"
     echo "[INFO] output_dir=$OUTPUT_DIR"
     echo "[INFO] array_index=$ARRAY_INDEX"
+    echo "[INFO] A=$A"
     echo "[INFO] train_size=$TRAIN_SIZE"
     echo "[INFO] test_size=$TEST_SIZE"
     echo "[INFO] batch_size=$BATCH_SIZE"
@@ -221,6 +224,10 @@ CMD=(
 
 if [ "$BIAS" = "1" ]; then
     CMD+=(--bias)
+fi
+
+if [ -n "$A" ]; then
+    CMD+=(--a "$A")
 fi
 
 {
