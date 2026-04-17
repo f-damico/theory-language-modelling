@@ -551,6 +551,7 @@ def plot_loss_vs_lambda(results: Dict[str, Any], ax: Optional[plt.Axes] = None) 
     pos = x[x > 0]
     if pos.size > 0:
         ax.set_xscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
+        ax.set_yscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
     ax.set_xlabel('message budget $\lambda$')
     ax.set_ylabel('test loss')
     ax.set_title('Local-budget BP: loss')
@@ -566,6 +567,7 @@ def plot_error_vs_lambda(results: Dict[str, Any], ax: Optional[plt.Axes] = None)
     pos = x[x > 0]
     if pos.size > 0:
         ax.set_xscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
+        ax.set_yscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
     ax.set_xlabel('message budget $\lambda$')
     ax.set_ylabel('test error')
     ax.set_title('Local-budget BP: error')
