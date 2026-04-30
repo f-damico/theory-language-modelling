@@ -1,78 +1,83 @@
-import os
+import argparse
+import copy
+import pickle
 import sys
 import time
-import copy
-
-import numpy as np
-import math
-import random
-
-import functools
-import argparse
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import torch.utils.data as data_utils
-
-import pickle
 
 import datasets
-import models
 import init
-import training
 import measures
+import models
+import training
 
-def run( args):
 
-    # reduce batch_size when larger than train_size
-    if (args.batch_size >= args.train_size):
+def _add_rhm_margin_measures(entry, model, train_loader, test_loader, args):
+    if getattr(args, 'compute_rhm_margins', False):
+        entry.update(measures.get_rhm_margin_measures_for_splits(model, train_loader, test_loader, args))
+    return entry
+
+
+def run(args):
+    # Reduce batch_size when larger than train_size.
+    if args.batch_size >= args.train_size:
         args.batch_size = args.train_size
-    
-    #assert (args.train_size%args.batch_size)==0, 'batch_size must divide train_size!'
+
+    if args.compute_rhm_margins and 'transformer' not in args.model:
+        raise ValueError('--compute_rhm_margins is currently implemented only for transformer models.')
 
     if args.accumulation:
         accumulation = args.train_size // args.batch_size
     else:
         accumulation = 1
 
-    train_loader, test_loader = init.init_data( args)
-
-    model = init.init_model( args)
-    model0 = copy.deepcopy( model)
+    train_loader, test_loader = init.init_data(args)
+    model = init.init_model(args)
+    model0 = copy.deepcopy(model)
 
     if args.scheduler_time is None:
         args.scheduler_time = args.max_epochs
-    criterion, optimizer, scheduler = init.init_training( model, args)
 
-    dynamics, best = init.init_output( model, criterion, train_loader, test_loader, args)
-
+    criterion, optimizer, scheduler = init.init_training(model, args)
+    dynamics, best = init.init_output(model, criterion, train_loader, test_loader, args)
     dynamics_timestep = []
 
     if args.save_trainstep_epochs is None:
         save_trainstep_epochs = 0
     else:
         save_trainstep_epochs = args.save_trainstep_epochs
-        if save_trainstep_epochs < 0:
-            raise ValueError('--save_trainstep_epochs must be >= 0 or None')
+
+    if save_trainstep_epochs < 0:
+        raise ValueError('--save_trainstep_epochs must be >= 0 or None')
 
     if save_trainstep_epochs > 0:
         print(
             f"[INFO] save_trainstep_epochs={save_trainstep_epochs}: "
             f"will save measures after every optimizer update for epochs "
-            f"0..{save_trainstep_epochs-1}"
+            f"0..{save_trainstep_epochs - 1}"
+        )
+
+    if args.compute_rhm_margins:
+        print(
+            '[INFO] compute_rhm_margins=True: saving train/test arrays '
+            'rhm_M_mean, rhm_M_pos_frac, rhm_survival_mean, '
+            'rhm_level_penalty_mean at validation checkpoints.'
+        )
+        print(
+            f"[INFO] rhm_margins_max_train_samples={args.rhm_margins_max_train_samples}, "
+            f"rhm_margins_max_test_samples={args.rhm_margins_max_test_samples}, "
+            f"rhm_margins_batch_size={args.rhm_margins_batch_size}"
         )
 
     def build_timestep_entry(epoch, update, global_update):
         train_loss_step, _ = measures.test(model, train_loader)
         test_loss_step, test_acc_step = measures.test(model, test_loader)
-
         entry = {
-            't': global_update,          # timestep axis for this separate history
-            'epoch': epoch + 1,          # 1-based epoch for readability
-            'epoch0': epoch,             # 0-based epoch index
-            'update': update,            # update index within the epoch, starting from 1
+            't': global_update,
+            'epoch': epoch + 1,
+            'epoch0': epoch,
+            'update': update,
             'global_update': global_update,
             'trainloss': train_loss_step,
             'testloss': test_loss_step,
@@ -90,31 +95,25 @@ def run( args):
             'dynamics_timestep': dynamics_timestep,
             'epoch': epoch_done,
             'save_trainstep_epochs': args.save_trainstep_epochs,
+            'compute_rhm_margins': args.compute_rhm_margins,
         }
 
-
-
     if args.print_freq >= 10:
-        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=True)
+        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=True)
     else:
-        print_ckpts = init.init_loglinckpt( args.print_freq, args.max_epochs, fill=False)
-    save_ckpts = init.init_loglinckpt( args.save_freq, args.max_epochs, fill=False)
+        print_ckpts = init.init_loglinckpt(args.print_freq, args.max_epochs, fill=False)
 
+    save_ckpts = init.init_loglinckpt(args.save_freq, args.max_epochs, fill=False)
     print_ckpt = next(print_ckpts)
     save_ckpt = next(save_ckpts)
 
     start_time = time.time()
-
     global_update = 0
 
     for epoch in range(args.max_epochs):
-
-        global_update = 0 if epoch == 0 else global_update
-
         def post_update_callback(epoch, update, num_updates_epoch, batch_idx):
             nonlocal global_update
             global_update += 1
-
             if epoch < save_trainstep_epochs:
                 entry = build_timestep_entry(
                     epoch=epoch,
@@ -134,20 +133,25 @@ def run( args):
             post_update_callback=post_update_callback if save_trainstep_epochs > 0 else None,
         )
 
-        if (epoch+1)==print_ckpt:
-
-            avg_epoch_time = (time.time()-start_time)/(epoch+1)
+        if (epoch + 1) == print_ckpt:
+            avg_epoch_time = (time.time() - start_time) / (epoch + 1)
             test_loss, test_acc = measures.test(model, test_loader)
 
-            if test_loss<best['loss']: # update best model if loss is smaller
-                best['epoch'] = epoch+1
+            if test_loss < best['loss']:
+                best['epoch'] = epoch + 1
                 best['loss'] = test_loss
                 best['acc'] = test_acc
-                best['model'] = copy.deepcopy( model.state_dict())
+                best['model'] = copy.deepcopy(model.state_dict())
 
             norm_measures = measures.get_norm_measures(model)
-            entry = {'t': epoch+1, 'trainloss': loss, 'testloss': test_loss, 'testacc': test_acc}
+            entry = {
+                't': epoch + 1,
+                'trainloss': loss,
+                'testloss': test_loss,
+                'testacc': test_acc,
+            }
             entry.update(norm_measures)
+
             if args.compute_margin_stats:
                 entry.update(
                     measures.get_margin_stats(
@@ -157,17 +161,22 @@ def run( args):
                         batch_size=args.batch_size,
                     )
                 )
+
+            _add_rhm_margin_measures(entry, model, train_loader, test_loader, args)
             dynamics.append(entry)
 
-            log_message = 'Epoch : {}\t train loss: {:06.4f}, test loss: {:06.4f}, test acc.: {:04.2f}, epoch time: {:5f}'.format(
-                epoch+1, loss, test_loss, test_acc, avg_epoch_time
-            )
+            log_message = (
+                'Epoch : {}\t train loss: {:06.4f}, test loss: {:06.4f}, '
+                'test acc.: {:04.2f}, epoch time: {:5f}'
+            ).format(epoch + 1, loss, test_loss, test_acc, avg_epoch_time)
+
             if 'specnorm' in norm_measures:
                 log_message += ', spectral complexity: {:.6e}'.format(norm_measures['specnorm'])
             if 'specnorm_no_qk' in norm_measures:
                 log_message += ', spectral complexity no QK: {:.6e}'.format(norm_measures['specnorm_no_qk'])
             if 'l2norm' in norm_measures:
                 log_message += ', l2 norm: {:.6e}'.format(norm_measures['l2norm'])
+
             if args.compute_margin_stats:
                 log_message += ', margin mean: {:.6e}, margin std: {:.6e}, margin min: {:.6e}, margin max: {:.6e}'.format(
                     entry['margin_mean'],
@@ -175,70 +184,79 @@ def run( args):
                     entry['margin_min'],
                     entry['margin_max'],
                 )
+
+            if args.compute_rhm_margins:
+                log_message += ', train M_l mean: {}'.format(
+                    '[' + ', '.join('{:.3e}'.format(x) for x in entry['train_rhm_M_mean']) + ']'
+                )
+                log_message += ', test M_l mean: {}'.format(
+                    '[' + ', '.join('{:.3e}'.format(x) for x in entry['test_rhm_M_mean']) + ']'
+                )
+
             print(log_message)
             print_ckpt = next(print_ckpts)
 
-            if (epoch+1)==save_ckpt:
+        if (epoch + 1) == save_ckpt:
+            print(f'Checkpoint at epoch {epoch + 1}, saving data ...')
+            output = make_output(epoch + 1)
+            with open(args.outname, 'wb') as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
+            save_ckpt = next(save_ckpts)
 
-                print(f'Checkpoint at epoch {epoch+1}, saving data ...')
-                output = make_output(epoch+1)
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
-                save_ckpt = next(save_ckpts)
-
-            if loss <= args.loss_threshold:
-
-                output = make_output(epoch+1)
-                with open(args.outname, "wb") as handle:
-                    pickle.dump(args, handle)
-                    pickle.dump(output, handle)
-
-                break
+        if loss <= args.loss_threshold:
+            output = make_output(epoch + 1)
+            with open(args.outname, 'wb') as handle:
+                pickle.dump(args, handle)
+                pickle.dump(output, handle)
+            break
 
     return None
 
+
 torch.set_default_dtype(torch.float32)
 
-parser = argparse.ArgumentParser(description='Supervised Learning of the Random Hierarchy Model with deep neural networks')
-parser.add_argument("--device", type=str, default='cuda')
-'''
-	DATASET ARGS
-'''
+parser = argparse.ArgumentParser(
+    description='Supervised Learning of the Random Hierarchy Model with deep neural networks'
+)
+parser.add_argument('--device', type=str, default='cuda')
+
+# Dataset args
 parser.add_argument('--dataset', type=str)
 parser.add_argument('--mode', type=str, default=None)
 parser.add_argument('--num_features', metavar='v', type=int, help='number of features')
 parser.add_argument('--num_classes', metavar='n', type=int, help='number of classes')
-parser.add_argument('--a', type=float, default=-1.0,
-                    help='if a<0 use the current RHM dataset; if a>=0 use power_law RHM with zipf=a on the last layer')
+parser.add_argument(
+    '--a',
+    type=float,
+    default=-1.0,
+    help='if a<0 use the current RHM dataset; if a>=0 use power_law RHM with zipf=a on the last layer',
+)
 parser.add_argument('--num_synonyms', metavar='m', type=int, help='multiplicity of low-level representations')
 parser.add_argument('--tuple_size', metavar='s', type=int, help='size of low-level representations')
 parser.add_argument('--num_layers', metavar='L', type=int, help='number of layers')
-parser.add_argument("--seed_rules", type=int, help='seed for the dataset')
-parser.add_argument("--path", type=str, help='path of the text')
-parser.add_argument("--num_tokens", type=int, help='number of input tokens (spatial size)')
+parser.add_argument('--seed_rules', type=int, help='seed for the dataset')
+parser.add_argument('--path', type=str, help='path of the text')
+parser.add_argument('--num_tokens', type=int, help='number of input tokens (spatial size)')
 parser.add_argument('--train_size', metavar='Ptr', type=int, help='training set size')
 parser.add_argument('--batch_size', metavar='B', type=int, help='batch size')
-parser.add_argument('--init_scale', type=float, default=1.0,
-                    help='multiplicative factor for random weight initialization')
+parser.add_argument('--init_scale', type=float, default=1.0, help='multiplicative factor for random weight initialization')
 parser.add_argument('--test_size', metavar='Pte', type=int, help='test set size')
-parser.add_argument("--seed_sample", type=int, help='seed for the sampling of train and testset')
+parser.add_argument('--seed_sample', type=int, help='seed for the sampling of train and testset')
 parser.add_argument('--input_format', type=str, default='onehot')
 parser.add_argument('--whitening', type=int, default=0)
-'''
-	ARCHITECTURE ARGS
-'''
+
+# Architecture args
 parser.add_argument('--model', type=str, help='architecture (fcn, hcnn, hlcn, transformer implemented)')
 parser.add_argument('--depth', type=int, help='depth of the network')
 parser.add_argument('--width', type=int, help='width of the network')
-parser.add_argument("--filter_size", type=int, default=None)
+parser.add_argument('--filter_size', type=int, default=None)
 parser.add_argument('--num_heads', type=int, help='number of heads (transformer only)')
-parser.add_argument('--embedding_dim', type=int, help='embedding dimension (transformer only)') #TODO use width for this too
+parser.add_argument('--embedding_dim', type=int, help='embedding dimension (transformer only)')
 parser.add_argument('--bias', default=False, action='store_true')
-parser.add_argument("--seed_model", type=int, help='seed for model initialization')
-'''
-       TRAINING ARGS
-'''
+parser.add_argument('--seed_model', type=int, help='seed for model initialization')
+
+# Training args
 parser.add_argument('--lr', type=float, help='learning rate', default=0.1)
 parser.add_argument('--optim', type=str, default='sgd')
 parser.add_argument('--accumulation', default=False, action='store_true')
@@ -250,11 +268,10 @@ parser.add_argument(
     '--save_trainstep_epochs',
     type=int,
     default=None,
-    help='if > 0, save measures after every optimizer update during the first N epochs'
+    help='if > 0, save measures after every optimizer update during the first N epochs',
 )
-'''
-	OUTPUT ARGS
-'''
+
+# Output args
 parser.add_argument('--print_freq', type=int, help='frequency of prints', default=10)
 parser.add_argument('--save_freq', type=int, help='frequency of saves', default=10)
 parser.add_argument('--loss_threshold', type=float, default=1e-3)
@@ -263,15 +280,40 @@ parser.add_argument(
     '--compute_margin_stats',
     default=False,
     action='store_true',
-    help='compute min/max/mean/std of training margins on a random subset of the training set'
+    help='compute min/max/mean/std of ordinary training margins on a deterministic subset of the training set',
 )
 parser.add_argument(
     '--margin_stats_max_samples',
     type=int,
     default=4096,
-    help='maximum number of random training examples used to compute margin statistics'
+    help='maximum number of training examples used to compute ordinary margin statistics',
+)
+
+# RHM last-token level margin diagnostics.  Only enabled for transformers.
+parser.add_argument(
+    '--compute_rhm_margins',
+    default=False,
+    action='store_true',
+    help='compute level-wise RHM last-token margins M_l for train and test splits at validation checkpoints',
+)
+parser.add_argument(
+    '--rhm_margins_max_train_samples',
+    type=int,
+    default=4096,
+    help='max train examples for RHM M_l diagnostics; set <=0 to use the full train split',
+)
+parser.add_argument(
+    '--rhm_margins_max_test_samples',
+    type=int,
+    default=4096,
+    help='max test examples for RHM M_l diagnostics; set <=0 to use the full test split',
+)
+parser.add_argument(
+    '--rhm_margins_batch_size',
+    type=int,
+    default=1024,
+    help='batch size used for RHM M_l diagnostics',
 )
 
 args = parser.parse_args()
-
-run( args)
+run(args)

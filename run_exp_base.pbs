@@ -1,9 +1,9 @@
 #!/bin/bash
-#PBS -N rhm_bluecurve
-#PBS -q gpuq-longrun
-#PBS -J 0-6
-#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
-#PBS -l walltime=200:00:00
+#PBS -N rhm_transformer
+#PBS -q gpuq
+#PBS -J 0-8
+#PBS -l select=1:ncpus=4:ngpus=1:mem=8gb
+#PBS -l walltime=8:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
@@ -12,36 +12,71 @@ set -eo pipefail
 REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
 RUN_SCRIPT="${RUN_SCRIPT:-$REPO_DIR/run_rhm_transformer_single.py}"
 
-# New logic:
-# pass RUN_NAME from terminal with qsub -v RUN_NAME=...
 DATA_ROOT="${DATA_ROOT:-$REPO_DIR/data}"
-RUN_NAME="${RUN_NAME:-rhm_bluecurve_default}"
+RUN_NAME="${RUN_NAME:-rhm_bluecurve_transformer_default}"
 OUTPUT_DIR="${OUTPUT_DIR:-$DATA_ROOT/$RUN_NAME}"
 
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-rhm}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda}"
-TAG="${TAG:-paper_L3_s2_v32_m8_bluecurve}"
+TAG="${TAG:-paper_L3_s2_v32_m8_transformer_bluecurve}"
 
-# Fixed seeds: one realisation only
+# Transformer model selection.
+# run_rhm_transformer_single.py currently launches main.py with --model transformer_mla.
+DEPTH="${DEPTH:-3}"
+NUM_HEADS="${NUM_HEADS:-16}"
+# Leave empty to use wrapper default: EMBEDDING_DIM = NUM_HEADS * NUM_FEATURES.
+EMBEDDING_DIM="${EMBEDDING_DIM:-}"
+
+# Fixed seeds: one realisation only.
 SEED_RULES="${SEED_RULES:-0}"
 SEED_SAMPLE="${SEED_SAMPLE:-0}"
 SEED_MODEL="${SEED_MODEL:-0}"
 
-# Same architecture / training setting as the blue curve run
+# Same RHM setting as the blue curve run.
+NUM_FEATURES="${NUM_FEATURES:-32}"
+NUM_CLASSES="${NUM_CLASSES:-32}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-8}"
+TUPLE_SIZE="${TUPLE_SIZE:-2}"
+NUM_LAYERS="${NUM_LAYERS:-3}"
+NUM_TOKENS="${NUM_TOKENS:-8}"
+
+# Transformer training defaults.
 TEST_SIZE="${TEST_SIZE:-32768}"
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
 ACCUMULATION="${ACCUMULATION:-0}"
 SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
 MAX_EPOCHS="${MAX_EPOCHS:-128}"
+LR="${LR:-0.005}"
+# These are fixed inside run_rhm_transformer_single.py/main.py for transformers.
+OPTIM="${OPTIM:-adam}"
+SCHEDULER="${SCHEDULER:-warmup}"
+SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
+PRINT_FREQ="${PRINT_FREQ:-1}"
+SAVE_FREQ="${SAVE_FREQ:-25}"
+LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
 
-# Training-set sizes P for the blue m=8 curve
-
+# Dataset switch kept from your convolutional PBS.
+# A < 0: standard RHM dataset. A >= 0: power-law / zipf-like dataset path.
 A="${A:--1}"
+
+# Optional old/ordinary output-margin statistics.
+# This is the pre-existing diagnostic, kept separate from the level-wise M_l quantities.
 COMPUTE_MARGINS="${COMPUTE_MARGINS:-false}"
+COMPUTE_MARGIN_STATS="${COMPUTE_MARGIN_STATS:-$COMPUTE_MARGINS}"
+MARGIN_STATS_MAX_SAMPLES="${MARGIN_STATS_MAX_SAMPLES:-4096}"
+
+# New RHM level-wise last-token diagnostics M_l.
+# This is NOT the old output-margin diagnostic above.
+COMPUTE_M_l="${COMPUTE_M_l:-false}"
+M_l_MAX_TRAIN_SAMPLES="${M_l_MAX_TRAIN_SAMPLES:-16384}"
+M_l_MAX_TEST_SAMPLES="${M_l_MAX_TEST_SAMPLES:-16384}"
+M_l_BATCH_SIZE="${M_l_BATCH_SIZE:-1024}"
 
 TRAIN_SIZES=(
+  256
+  1024
   4096
   16384
   65536
@@ -50,9 +85,6 @@ TRAIN_SIZES=(
   2097152
   4194304
 )
-
-
-MARGIN_STATS_MAX_SAMPLES="${MARGIN_STATS_MAX_SAMPLES:-4096}"
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"
 JOB_ID="${PBS_JOBID:-no_jobid}"
@@ -71,7 +103,6 @@ fi
 TRAIN_SIZE="${TRAIN_SIZES[$ARRAY_INDEX]}"
 ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}.log"
 
-# Modules / environment
 if command -v module >/dev/null 2>&1; then
     module purge || true
 fi
@@ -90,7 +121,6 @@ fi
 
 set -u
 
-# Older PyTorch builds may not like UUID-form CUDA_VISIBLE_DEVICES.
 ORIG_CVD="${CUDA_VISIBLE_DEVICES:-unset}"
 if [[ "${ORIG_CVD}" == GPU-* ]]; then
     GPU_INDEX_FROM_UUID="$($PYTHON_BIN - <<'PY'
@@ -124,11 +154,29 @@ fi
     echo "[INFO] train_size=$TRAIN_SIZE"
     echo "[INFO] test_size=$TEST_SIZE"
     echo "[INFO] batch_size=$BATCH_SIZE"
-    echo "[INFO] a=$A"
+    echo "[INFO] transformer_model=transformer_mla"
+    echo "[INFO] depth=$DEPTH"
+    echo "[INFO] num_heads=$NUM_HEADS"
+    echo "[INFO] embedding_dim=${EMBEDDING_DIM:-wrapper_default_num_heads_times_num_features}"
+    echo "[INFO] A=$A"
+    echo "[INFO] lr=$LR"
+    echo "[INFO] optim=$OPTIM"
+    echo "[INFO] scheduler=$SCHEDULER"
+    echo "[INFO] scheduler_time=$SCHEDULER_TIME"
     echo "[INFO] accumulation=$ACCUMULATION"
     echo "[INFO] save_trainstep_epochs=${SAVE_TRAINSTEP_EPOCHS:-None}"
-    echo "[INFO] INIT_SCALE=$INIT_SCALE"
+    echo "[INFO] init_scale=$INIT_SCALE"
     echo "[INFO] max_epochs=$MAX_EPOCHS"
+    echo "[INFO] print_freq=$PRINT_FREQ"
+    echo "[INFO] save_freq=$SAVE_FREQ"
+    echo "[INFO] loss_threshold=$LOSS_THRESHOLD"
+    echo "[INFO] compute_margins_old_output_diagnostic=$COMPUTE_MARGINS"
+    echo "[INFO] compute_margin_stats=$COMPUTE_MARGIN_STATS"
+    echo "[INFO] margin_stats_max_samples=$MARGIN_STATS_MAX_SAMPLES"
+    echo "[INFO] compute_M_l=$COMPUTE_M_l"
+    echo "[INFO] M_l_max_train_samples=$M_l_MAX_TRAIN_SAMPLES"
+    echo "[INFO] M_l_max_test_samples=$M_l_MAX_TEST_SAMPLES"
+    echo "[INFO] M_l_batch_size=$M_l_BATCH_SIZE"
     echo "[INFO] seed_rules=$SEED_RULES"
     echo "[INFO] seed_sample=$SEED_SAMPLE"
     echo "[INFO] seed_model=$SEED_MODEL"
@@ -139,6 +187,7 @@ fi
     echo "[INFO] python_version=$($PYTHON_BIN --version 2>&1 || true)"
     echo "[INFO] orig_cuda_visible_devices=$ORIG_CVD"
     echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    echo "[INFO] RHM params: v=$NUM_FEATURES n=$NUM_CLASSES m=$NUM_SYNONYMS s=$TUPLE_SIZE L=$NUM_LAYERS num_tokens=$NUM_TOKENS"
     if command -v nvidia-smi >/dev/null 2>&1; then
         echo "[INFO] nvidia-smi:"
         nvidia-smi || true
@@ -168,24 +217,58 @@ CMD=(
     --device "$DEVICE"
     --train_size "$TRAIN_SIZE"
     --test_size "$TEST_SIZE"
+    --num_features "$NUM_FEATURES"
+    --num_classes "$NUM_CLASSES"
+    --num_synonyms "$NUM_SYNONYMS"
+    --tuple_size "$TUPLE_SIZE"
+    --num_layers "$NUM_LAYERS"
+    --num_tokens "$NUM_TOKENS"
+    --depth "$DEPTH"
+    --num_heads "$NUM_HEADS"
+    --lr "$LR"
+    --scheduler_time "$SCHEDULER_TIME"
     --batch_size "$BATCH_SIZE"
     --init_scale "$INIT_SCALE"
-    --a "$A"
     --max_epochs "$MAX_EPOCHS"
+    --print_freq "$PRINT_FREQ"
+    --save_freq "$SAVE_FREQ"
+    --loss_threshold "$LOSS_THRESHOLD"
     --seed_rules "$SEED_RULES"
     --seed_sample "$SEED_SAMPLE"
     --seed_model "$SEED_MODEL"
     --tag "$TAG"
+    --a "$A"
 )
 
-case "${COMPUTE_MARGINS,,}" in
+if [ -n "$EMBEDDING_DIM" ]; then
+    CMD+=(--embedding_dim "$EMBEDDING_DIM")
+fi
+
+case "${COMPUTE_MARGIN_STATS,,}" in
     true|1|yes|y)
         CMD+=(--compute_margin_stats --margin_stats_max_samples "$MARGIN_STATS_MAX_SAMPLES")
         ;;
     false|0|no|n)
         ;;
     *)
-        echo "[ERROR] Invalid COMPUTE_MARGINS value: $COMPUTE_MARGINS" | tee -a "$ARRAY_LOG"
+        echo "[ERROR] Invalid COMPUTE_MARGIN_STATS value: $COMPUTE_MARGIN_STATS" | tee -a "$ARRAY_LOG"
+        exit 1
+        ;;
+esac
+
+case "${COMPUTE_M_l,,}" in
+    true|1|yes|y)
+        CMD+=(
+            --compute_rhm_margins
+            --rhm_margins_max_train_samples "$M_l_MAX_TRAIN_SAMPLES"
+            --rhm_margins_max_test_samples "$M_l_MAX_TEST_SAMPLES"
+            --rhm_margins_batch_size "$M_l_BATCH_SIZE"
+        )
+        ;;
+    false|0|no|n)
+        ;;
+    *)
+        echo "[ERROR] Invalid COMPUTE_M_l value: $COMPUTE_M_l" | tee -a "$ARRAY_LOG"
         exit 1
         ;;
 esac
@@ -200,7 +283,7 @@ fi
 
 {
     echo "[CMD] ${CMD[*]}"
-    echo "[RUN] launching blue-curve point P=${TRAIN_SIZE}"
+    echo "[RUN] launching transformer blue-curve point P=${TRAIN_SIZE}"
 } | tee -a "$ARRAY_LOG"
 
 "${CMD[@]}" 2>&1 | tee -a "$ARRAY_LOG"

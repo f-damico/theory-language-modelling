@@ -28,6 +28,35 @@ MARGIN_MEAN_KEY = "margin_mean"
 MARGIN_MAX_KEY = "margin_max"
 MARGIN_STD_KEY = "margin_std"
 
+# Scalar diagnostics already present in the old collector.
+SCALAR_DYNAMICS_KEYS = (
+    "trainloss",
+    "trainacc",
+    "trainerr",
+    "testloss",
+    "testacc",
+    "err",
+    "spectral",
+    "spectral_no_qk",
+    "l2",
+    "margin_min",
+    "margin_mean",
+    "margin_max",
+    "margin_std",
+)
+
+# New RHM level-wise M_l diagnostics saved by the modified transformer code.
+# For each split, the raw training files contain keys like:
+#   train_rhm_M_mean, test_rhm_M_mean, ...
+# Each value is a vector of length L = num_layers.
+RHM_ML_VECTOR_KEYS = (
+    "rhm_M_mean",
+    "rhm_M_pos_frac",
+    "rhm_survival_mean",
+    "rhm_level_penalty_mean",
+)
+RHM_SPLITS = ("train", "test")
+
 
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
@@ -56,50 +85,113 @@ def load_one_file(path):
     return args_dict, output
 
 
+def _to_1d_float(value, length=None):
+    if value is None:
+        if length is None:
+            return np.array([], dtype=float)
+        return np.full(int(length), np.nan, dtype=float)
+
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if length is None:
+        return arr
+
+    out = np.full(int(length), np.nan, dtype=float)
+    n = min(out.size, arr.size)
+    if n > 0:
+        out[:n] = arr[:n]
+    return out
+
+
+def _to_1d_int(value, length=None):
+    if value is None:
+        if length is None:
+            return np.array([], dtype=int)
+        return np.full(int(length), -1, dtype=int)
+
+    arr = np.asarray(value, dtype=int).reshape(-1)
+    if length is None:
+        return arr
+
+    out = np.full(int(length), -1, dtype=int)
+    n = min(out.size, arr.size)
+    if n > 0:
+        out[:n] = arr[:n]
+    return out
+
+
+def _infer_num_rhm_levels(dyn):
+    """
+    Infer L from one raw dynamics list.
+
+    Priority:
+    1. train_rhm_levels / test_rhm_levels;
+    2. any vector diagnostic such as train_rhm_M_mean;
+    3. zero if not available.
+    """
+    for d in dyn:
+        for split in RHM_SPLITS:
+            levels = d.get(f"{split}_rhm_levels")
+            if levels is not None:
+                arr = np.asarray(levels).reshape(-1)
+                if arr.size > 0:
+                    return int(arr.size)
+
+        for split in RHM_SPLITS:
+            for key in RHM_ML_VECTOR_KEYS:
+                value = d.get(f"{split}_{key}")
+                if value is not None:
+                    arr = np.asarray(value).reshape(-1)
+                    if arr.size > 0:
+                        return int(arr.size)
+
+    return 0
+
+
 def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
     dyn = output.get(dyn_key, [])
     if dyn is None:
         dyn = []
 
-    if len(dyn) == 0:
-        return {
-            time_name: np.array([], dtype=int),
+    n_levels = _infer_num_rhm_levels(dyn)
 
+    if len(dyn) == 0:
+        out = {
+            time_name: np.array([], dtype=int),
             "trainloss": np.array([], dtype=float),
             "trainacc": np.array([], dtype=float),
             "trainerr": np.array([], dtype=float),
-
             "testloss": np.array([], dtype=float),
             "testacc": np.array([], dtype=float),
             "err": np.array([], dtype=float),
-
             "spectral": np.array([], dtype=float),
             "spectral_no_qk": np.array([], dtype=float),
             "l2": np.array([], dtype=float),
-
             "margin_min": np.array([], dtype=float),
             "margin_mean": np.array([], dtype=float),
             "margin_max": np.array([], dtype=float),
             "margin_std": np.array([], dtype=float),
+            "rhm_num_levels": np.array(0, dtype=int),
         }
+        for split in RHM_SPLITS:
+            for key in RHM_ML_VECTOR_KEYS:
+                out[f"{split}_{key}"] = np.full((0, 0), np.nan, dtype=float)
+            out[f"{split}_rhm_levels"] = np.full((0, 0), -1, dtype=int)
+            out[f"{split}_rhm_margin_num_samples"] = np.array([], dtype=float)
+        return out
 
-    # For epoch dynamics, "t" is epoch index.
-    # For timestep dynamics, allow fallback to "global_update" if needed.
     times = np.array(
         [int(d.get("t", d.get("global_update", -1))) for d in dyn],
-        dtype=int
+        dtype=int,
     )
 
     trainloss = np.array([d["trainloss"] for d in dyn], dtype=float)
 
-    # Optional train accuracy/error support:
-    # if trainacc is not present in raw files, these become NaN and propagate cleanly.
     trainacc = np.array([d.get("trainacc", np.nan) for d in dyn], dtype=float)
     trainerr = np.array(
         [
             d.get(
                 "trainerr",
-                (1.0 - d["trainacc"]) if ("trainacc" in d and np.isfinite(d["trainacc"])) else np.nan
+                (1.0 - d["trainacc"]) if ("trainacc" in d and np.isfinite(d["trainacc"])) else np.nan,
             )
             for d in dyn
         ],
@@ -108,40 +200,47 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
 
     testloss = np.array([d["testloss"] for d in dyn], dtype=float)
     testacc = np.array([d["testacc"] for d in dyn], dtype=float)
-    err = np.array(
-        [d.get("err", 1.0 - d["testacc"]) for d in dyn],
-        dtype=float
-    )
+    err = np.array([d.get("err", 1.0 - d["testacc"]) for d in dyn], dtype=float)
 
-    spectral = np.array([d.get(SPECTRAL_KEY, np.nan) for d in dyn], dtype=float)
-    spectral_no_qk = np.array([d.get(SPECTRAL_NO_QK_KEY, np.nan) for d in dyn], dtype=float)
-    l2 = np.array([d.get(L2_KEY, np.nan) for d in dyn], dtype=float)
-
-    margin_min = np.array([d.get(MARGIN_MIN_KEY, np.nan) for d in dyn], dtype=float)
-    margin_mean = np.array([d.get(MARGIN_MEAN_KEY, np.nan) for d in dyn], dtype=float)
-    margin_max = np.array([d.get(MARGIN_MAX_KEY, np.nan) for d in dyn], dtype=float)
-    margin_std = np.array([d.get(MARGIN_STD_KEY, np.nan) for d in dyn], dtype=float)
-
-    return {
+    out = {
         time_name: times,
-
         "trainloss": trainloss,
         "trainacc": trainacc,
         "trainerr": trainerr,
-
         "testloss": testloss,
         "testacc": testacc,
         "err": err,
-
-        "spectral": spectral,
-        "spectral_no_qk": spectral_no_qk,
-        "l2": l2,
-
-        "margin_min": margin_min,
-        "margin_mean": margin_mean,
-        "margin_max": margin_max,
-        "margin_std": margin_std,
+        "spectral": np.array([d.get(SPECTRAL_KEY, np.nan) for d in dyn], dtype=float),
+        "spectral_no_qk": np.array([d.get(SPECTRAL_NO_QK_KEY, np.nan) for d in dyn], dtype=float),
+        "l2": np.array([d.get(L2_KEY, np.nan) for d in dyn], dtype=float),
+        "margin_min": np.array([d.get(MARGIN_MIN_KEY, np.nan) for d in dyn], dtype=float),
+        "margin_mean": np.array([d.get(MARGIN_MEAN_KEY, np.nan) for d in dyn], dtype=float),
+        "margin_max": np.array([d.get(MARGIN_MAX_KEY, np.nan) for d in dyn], dtype=float),
+        "margin_std": np.array([d.get(MARGIN_STD_KEY, np.nan) for d in dyn], dtype=float),
+        "rhm_num_levels": np.array(n_levels, dtype=int),
     }
+
+    for split in RHM_SPLITS:
+        for key in RHM_ML_VECTOR_KEYS:
+            full_key = f"{split}_{key}"
+            out[full_key] = np.stack(
+                [_to_1d_float(d.get(full_key), length=n_levels) for d in dyn],
+                axis=0,
+            ) if n_levels > 0 else np.full((len(dyn), 0), np.nan, dtype=float)
+
+        levels_key = f"{split}_rhm_levels"
+        out[levels_key] = np.stack(
+            [
+                _to_1d_int(d.get(levels_key, np.arange(1, n_levels + 1)), length=n_levels)
+                for d in dyn
+            ],
+            axis=0,
+        ) if n_levels > 0 else np.full((len(dyn), 0), -1, dtype=int)
+
+        n_key = f"{split}_rhm_margin_num_samples"
+        out[n_key] = np.array([d.get(n_key, np.nan) for d in dyn], dtype=float)
+
+    return out
 
 
 def comparable_params(args_dict):
@@ -151,6 +250,14 @@ def comparable_params(args_dict):
 def nanmean_std_with_flag(x, axis):
     valid = ~np.isnan(x)
     counts = valid.sum(axis=axis)
+
+    if x.size == 0 or x.shape[axis] == 0:
+        out_shape = tuple(s for i, s in enumerate(x.shape) if i != axis)
+        return (
+            np.full(out_shape, np.nan, dtype=float),
+            np.full(out_shape, -1.0, dtype=float),
+            np.zeros(out_shape, dtype=int),
+        )
 
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = np.nanmean(x, axis=axis)
@@ -164,18 +271,83 @@ def nanmean_std_with_flag(x, axis):
 
 def nanmean_std_with_flag_optional(raw):
     """
-    raw is assumed to have shape (nP, max_seeds, nT).
-    If nT == 0, return empty arrays with shape (nP, 0)
-    instead of doing reductions on empty slices.
+    raw has shape (nP, max_seeds, nT, optional_level_dim...).
+    Reduces over seed axis=1.
     """
-    if raw.shape[-1] == 0:
-        out_shape = (raw.shape[0], 0)
-        mean = np.full(out_shape, np.nan, dtype=float)
-        std = np.full(out_shape, -1.0, dtype=float)
-        counts = np.zeros(out_shape, dtype=int)
-        return mean, std, counts
-
     return nanmean_std_with_flag(raw, axis=1)
+
+
+def _allocate_raw(nP, max_seeds, nT, n_levels=None, dtype=float, fill_value=np.nan):
+    if n_levels is None:
+        shape = (nP, max_seeds, nT)
+    else:
+        shape = (nP, max_seeds, nT, n_levels)
+    return np.full(shape, fill_value, dtype=dtype)
+
+
+def _fill_vector(raw, iP, iseed, j, value):
+    if raw.ndim != 4:
+        return
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    n = min(raw.shape[-1], arr.size)
+    if n > 0:
+        raw[iP, iseed, j, :n] = arr[:n]
+
+
+def _fill_int_vector(raw, iP, iseed, j, value):
+    if raw.ndim != 4:
+        return
+    arr = np.asarray(value, dtype=int).reshape(-1)
+    n = min(raw.shape[-1], arr.size)
+    if n > 0:
+        raw[iP, iseed, j, :n] = arr[:n]
+
+
+def _infer_global_num_levels(entries, suffix=""):
+    max_L = 0
+    for e in entries:
+        for split in RHM_SPLITS:
+            for key in RHM_ML_VECTOR_KEYS:
+                arr = np.asarray(e.get(f"{split}_{key}{suffix}", np.empty((0, 0))))
+                if arr.ndim >= 2:
+                    max_L = max(max_L, int(arr.shape[-1]))
+    return max_L
+
+
+def _transpose_seed_axis(raw):
+    if raw.ndim == 3:
+        return np.transpose(raw, (0, 2, 1))
+    if raw.ndim == 4:
+        return np.transpose(raw, (0, 2, 1, 3))
+    raise ValueError(f"Unsupported raw ndim: {raw.ndim}")
+
+
+def _add_metric_result(result, name, raw, *, timestep=False):
+    """
+    Add raw, seed-resolved, and aggregated versions of one metric.
+
+    For epoch metrics:
+        name_raw, name_seeds, name_mean, name_std, name_n
+    For timestep metrics:
+        name_timestep_raw, name_seeds_timestep, name_timestep_mean, ...
+    """
+    mean, std, n = nanmean_std_with_flag_optional(raw)
+    seeds = _transpose_seed_axis(raw)
+
+    if timestep:
+        result[f"{name}_timestep_raw"] = raw
+        result[f"{name}_seeds_timestep"] = seeds
+        result[f"{name}_timestep_mean"] = mean
+        result[f"{name}_timestep_std"] = std
+        result[f"{name}_timestep_n"] = n
+    else:
+        result[f"{name}_raw"] = raw
+        result[f"{name}_seeds"] = seeds
+        result[f"{name}_mean"] = mean
+        result[f"{name}_std"] = std
+        result[f"{name}_n"] = n
+
+    return seeds, mean, std, n
 
 
 def main():
@@ -201,7 +373,6 @@ def main():
     if len(files) == 0:
         raise FileNotFoundError(f"No .pkl files found in {run_dir}")
 
-    # Read all files once
     entries = []
     for path in files:
         args_dict, output = load_one_file(path)
@@ -218,48 +389,30 @@ def main():
             "seed_model": int(args_dict.get("seed_model", -1)),
             "args": args_dict,
             "params_compare": comparable_params(args_dict),
-
-            # epoch-level dynamics
             "epochs": dyn["epochs"],
-            "trainloss": dyn["trainloss"],
-            "trainacc": dyn["trainacc"],
-            "trainerr": dyn["trainerr"],
-            "testloss": dyn["testloss"],
-            "testacc": dyn["testacc"],
-            "err": dyn["err"],
-            "spectral": dyn["spectral"],
-            "spectral_no_qk": dyn["spectral_no_qk"],
-            "l2": dyn["l2"],
-            "margin_min": dyn["margin_min"],
-            "margin_mean": dyn["margin_mean"],
-            "margin_max": dyn["margin_max"],
-            "margin_std": dyn["margin_std"],
-
-            # timestep-level dynamics (optional)
             "timesteps": dyn_timestep["timesteps"],
-            "trainloss_timestep": dyn_timestep["trainloss"],
-            "trainacc_timestep": dyn_timestep["trainacc"],
-            "trainerr_timestep": dyn_timestep["trainerr"],
-            "testloss_timestep": dyn_timestep["testloss"],
-            "testacc_timestep": dyn_timestep["testacc"],
-            "err_timestep": dyn_timestep["err"],
-            "spectral_timestep": dyn_timestep["spectral"],
-            "spectral_no_qk_timestep": dyn_timestep["spectral_no_qk"],
-            "l2_timestep": dyn_timestep["l2"],
-            "margin_min_timestep": dyn_timestep["margin_min"],
-            "margin_mean_timestep": dyn_timestep["margin_mean"],
-            "margin_max_timestep": dyn_timestep["margin_max"],
-            "margin_std_timestep": dyn_timestep["margin_std"],
-
-            # summaries
             "best_loss": float(best.get("loss", np.nan)),
             "best_acc": float(best.get("acc", np.nan)),
             "best_epoch": float(best.get("epoch", np.nan)),
             "last_saved_epoch": float(output.get("epoch", np.nan)),
         }
+
+        for key in SCALAR_DYNAMICS_KEYS:
+            entry[key] = dyn[key]
+            entry[f"{key}_timestep"] = dyn_timestep[key]
+
+        for split in RHM_SPLITS:
+            for key in RHM_ML_VECTOR_KEYS:
+                entry[f"{split}_{key}"] = dyn[f"{split}_{key}"]
+                entry[f"{split}_{key}_timestep"] = dyn_timestep[f"{split}_{key}"]
+            entry[f"{split}_rhm_levels"] = dyn[f"{split}_rhm_levels"]
+            entry[f"{split}_rhm_levels_timestep"] = dyn_timestep[f"{split}_rhm_levels"]
+            entry[f"{split}_rhm_margin_num_samples"] = dyn[f"{split}_rhm_margin_num_samples"]
+            entry[f"{split}_rhm_margin_num_samples_timestep"] = dyn_timestep[f"{split}_rhm_margin_num_samples"]
+
         entries.append(entry)
 
-    # Check that all non-seed, non-train_size params are identical
+    # Check that all non-seed, non-train_size params are identical.
     ref = entries[0]["params_compare"]
     for e in entries[1:]:
         if e["params_compare"] != ref:
@@ -270,12 +423,10 @@ def main():
                 f"Problematic file: {e['path']}"
             )
 
-    # Sorted unique P and global unions of saved checkpoints
     P_values = np.array(sorted({e["train_size"] for e in entries}), dtype=int)
     epoch_values = np.array(sorted({int(t) for e in entries for t in e["epochs"]}), dtype=int)
     timestep_values = np.array(sorted({int(t) for e in entries for t in e["timesteps"]}), dtype=int)
 
-    # Group entries by P
     entries_by_P = {int(P): [] for P in P_values}
     for e in entries:
         entries_by_P[int(e["train_size"])].append(e)
@@ -283,7 +434,7 @@ def main():
     for P in P_values:
         entries_by_P[int(P)] = sorted(
             entries_by_P[int(P)],
-            key=lambda e: (e["seed_rules"], e["seed_sample"], e["seed_model"], e["path"])
+            key=lambda e: (e["seed_rules"], e["seed_sample"], e["seed_model"], e["path"]),
         )
 
     max_seeds = max(len(v) for v in entries_by_P.values())
@@ -291,61 +442,38 @@ def main():
     nT = len(epoch_values)
     nTs = len(timestep_values)
 
-    # -----------------------------
-    # Raw epoch arrays: (nP, max_seeds, nT)
-    # -----------------------------
-    trainloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    trainacc_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    trainerr_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    n_ml_levels = _infer_global_num_levels(entries, suffix="")
+    n_ml_levels_timestep = _infer_global_num_levels(entries, suffix="_timestep")
 
-    testloss_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    testacc_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    epoch_to_idx = {int(t): i for i, t in enumerate(epoch_values)}
+    timestep_to_idx = {int(t): i for i, t in enumerate(timestep_values)}
 
-    spectral_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    spectral_no_qk_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    l2_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    # Raw epoch arrays for scalar diagnostics.
+    raw = {key: _allocate_raw(nP, max_seeds, nT) for key in SCALAR_DYNAMICS_KEYS}
 
-    margin_min_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    margin_mean_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    margin_max_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
-    margin_std_raw = np.full((nP, max_seeds, nT), np.nan, dtype=float)
+    # Raw timestep arrays for scalar diagnostics.
+    raw_timestep = {key: _allocate_raw(nP, max_seeds, nTs) for key in SCALAR_DYNAMICS_KEYS}
 
-    # -----------------------------
-    # Raw timestep arrays: (nP, max_seeds, nTs)
-    # -----------------------------
-    trainloss_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    trainacc_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    trainerr_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
+    # Raw epoch arrays for M_l diagnostics.
+    ml_raw = {}
+    ml_raw_timestep = {}
+    for split in RHM_SPLITS:
+        for key in RHM_ML_VECTOR_KEYS:
+            ml_raw[f"{split}_{key}"] = _allocate_raw(nP, max_seeds, nT, n_levels=n_ml_levels)
+            ml_raw_timestep[f"{split}_{key}"] = _allocate_raw(nP, max_seeds, nTs, n_levels=n_ml_levels_timestep)
+        ml_raw[f"{split}_rhm_levels"] = _allocate_raw(nP, max_seeds, nT, n_levels=n_ml_levels, dtype=int, fill_value=-1)
+        ml_raw_timestep[f"{split}_rhm_levels"] = _allocate_raw(nP, max_seeds, nTs, n_levels=n_ml_levels_timestep, dtype=int, fill_value=-1)
+        ml_raw[f"{split}_rhm_margin_num_samples"] = _allocate_raw(nP, max_seeds, nT)
+        ml_raw_timestep[f"{split}_rhm_margin_num_samples"] = _allocate_raw(nP, max_seeds, nTs)
 
-    testloss_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    testacc_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-
-    spectral_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    spectral_no_qk_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    l2_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-
-    margin_min_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    margin_mean_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    margin_max_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-    margin_std_timestep_raw = np.full((nP, max_seeds, nTs), np.nan, dtype=float)
-
-    # Raw scalar summaries: shape (nP, max_seeds)
     best_loss_raw = np.full((nP, max_seeds), np.nan, dtype=float)
     best_acc_raw = np.full((nP, max_seeds), np.nan, dtype=float)
     best_epoch_raw = np.full((nP, max_seeds), np.nan, dtype=float)
     last_saved_epoch_raw = np.full((nP, max_seeds), np.nan, dtype=float)
 
-    # Seeds: shape (nP, max_seeds, 3)
     seed_triplets = np.full((nP, max_seeds, 3), -1, dtype=int)
-
-    # Counts
     num_seeds = np.zeros(nP, dtype=int)
-
-    # Optional traceability
     file_index = np.full((nP, max_seeds), "", dtype=object)
-
-    epoch_to_idx = {int(t): i for i, t in enumerate(epoch_values)}
-    timestep_to_idx = {int(t): i for i, t in enumerate(timestep_values)}
 
     for iP, P in enumerate(P_values):
         plist = entries_by_P[int(P)]
@@ -357,363 +485,108 @@ def main():
             seed_triplets[iP, iseed, 2] = e["seed_model"]
             file_index[iP, iseed] = e["path"]
 
-            # epoch-level fills
             for local_i, ep in enumerate(e["epochs"]):
                 j = epoch_to_idx[int(ep)]
-                trainloss_raw[iP, iseed, j] = e["trainloss"][local_i]
-                trainacc_raw[iP, iseed, j] = e["trainacc"][local_i]
-                trainerr_raw[iP, iseed, j] = e["trainerr"][local_i]
+                for key in SCALAR_DYNAMICS_KEYS:
+                    raw[key][iP, iseed, j] = e[key][local_i]
 
-                testloss_raw[iP, iseed, j] = e["testloss"][local_i]
-                testacc_raw[iP, iseed, j] = e["testacc"][local_i]
+                for split in RHM_SPLITS:
+                    for key in RHM_ML_VECTOR_KEYS:
+                        _fill_vector(ml_raw[f"{split}_{key}"], iP, iseed, j, e[f"{split}_{key}"][local_i])
+                    _fill_int_vector(ml_raw[f"{split}_rhm_levels"], iP, iseed, j, e[f"{split}_rhm_levels"][local_i])
+                    ml_raw[f"{split}_rhm_margin_num_samples"][iP, iseed, j] = e[f"{split}_rhm_margin_num_samples"][local_i]
 
-                spectral_raw[iP, iseed, j] = e["spectral"][local_i]
-                spectral_no_qk_raw[iP, iseed, j] = e["spectral_no_qk"][local_i]
-                l2_raw[iP, iseed, j] = e["l2"][local_i]
-
-                margin_min_raw[iP, iseed, j] = e["margin_min"][local_i]
-                margin_mean_raw[iP, iseed, j] = e["margin_mean"][local_i]
-                margin_max_raw[iP, iseed, j] = e["margin_max"][local_i]
-                margin_std_raw[iP, iseed, j] = e["margin_std"][local_i]
-
-            # timestep-level fills (optional)
             for local_i, ts in enumerate(e["timesteps"]):
                 j = timestep_to_idx[int(ts)]
-                trainloss_timestep_raw[iP, iseed, j] = e["trainloss_timestep"][local_i]
-                trainacc_timestep_raw[iP, iseed, j] = e["trainacc_timestep"][local_i]
-                trainerr_timestep_raw[iP, iseed, j] = e["trainerr_timestep"][local_i]
+                for key in SCALAR_DYNAMICS_KEYS:
+                    raw_timestep[key][iP, iseed, j] = e[f"{key}_timestep"][local_i]
 
-                testloss_timestep_raw[iP, iseed, j] = e["testloss_timestep"][local_i]
-                testacc_timestep_raw[iP, iseed, j] = e["testacc_timestep"][local_i]
-
-                spectral_timestep_raw[iP, iseed, j] = e["spectral_timestep"][local_i]
-                spectral_no_qk_timestep_raw[iP, iseed, j] = e["spectral_no_qk_timestep"][local_i]
-                l2_timestep_raw[iP, iseed, j] = e["l2_timestep"][local_i]
-
-                margin_min_timestep_raw[iP, iseed, j] = e["margin_min_timestep"][local_i]
-                margin_mean_timestep_raw[iP, iseed, j] = e["margin_mean_timestep"][local_i]
-                margin_max_timestep_raw[iP, iseed, j] = e["margin_max_timestep"][local_i]
-                margin_std_timestep_raw[iP, iseed, j] = e["margin_std_timestep"][local_i]
+                for split in RHM_SPLITS:
+                    for key in RHM_ML_VECTOR_KEYS:
+                        _fill_vector(ml_raw_timestep[f"{split}_{key}"], iP, iseed, j, e[f"{split}_{key}_timestep"][local_i])
+                    _fill_int_vector(ml_raw_timestep[f"{split}_rhm_levels"], iP, iseed, j, e[f"{split}_rhm_levels_timestep"][local_i])
+                    ml_raw_timestep[f"{split}_rhm_margin_num_samples"][iP, iseed, j] = e[f"{split}_rhm_margin_num_samples_timestep"][local_i]
 
             best_loss_raw[iP, iseed] = e["best_loss"]
             best_acc_raw[iP, iseed] = e["best_acc"]
             best_epoch_raw[iP, iseed] = e["best_epoch"]
             last_saved_epoch_raw[iP, iseed] = e["last_saved_epoch"]
 
-    # Derived raw errors
-    err_raw = 1.0 - testacc_raw
-    err_timestep_raw = 1.0 - testacc_timestep_raw
+    # Keep the original convention: derive errors from test accuracy.
+    raw["err"] = 1.0 - raw["testacc"]
+    raw_timestep["err"] = 1.0 - raw_timestep["testacc"]
 
-    # -----------------------------
-    # Aggregate epoch arrays over seed axis=1
-    # -----------------------------
-    trainloss_mean, trainloss_std, trainloss_n = nanmean_std_with_flag_optional(trainloss_raw)
-    trainacc_mean, trainacc_std, trainacc_n = nanmean_std_with_flag_optional(trainacc_raw)
-    trainerr_mean, trainerr_std, trainerr_n = nanmean_std_with_flag_optional(trainerr_raw)
+    result = {
+        "run_name": np.array(args.run_name),
+        "experiment_name": np.array(experiment_name),
+        "fixed_params": np.array(ref, dtype=object),
+        "P_values": P_values,
+        "epoch_values": epoch_values,
+        "T_arr": epoch_values.copy(),
+        "timestep_values": timestep_values,
+        "T_arr_timestep": timestep_values.copy(),
+        "num_seeds": num_seeds,
+        "seed_triplets": seed_triplets,
+        "rhm_M_l_num_levels": np.array(n_ml_levels, dtype=int),
+        "rhm_M_l_num_levels_timestep": np.array(n_ml_levels_timestep, dtype=int),
+    }
 
-    testloss_mean, testloss_std, testloss_n = nanmean_std_with_flag_optional(testloss_raw)
-    testacc_mean, testacc_std, testacc_n = nanmean_std_with_flag_optional(testacc_raw)
-    err_mean, err_std, err_n = nanmean_std_with_flag_optional(err_raw)
+    # Old scalar epoch and timestep outputs, with the same key names as before.
+    saved_shapes = {}
+    for key in SCALAR_DYNAMICS_KEYS:
+        seeds, mean, std, n = _add_metric_result(result, key, raw[key], timestep=False)
+        saved_shapes[f"{key}_seeds"] = seeds.shape
+        seeds_ts, mean_ts, std_ts, n_ts = _add_metric_result(result, key, raw_timestep[key], timestep=True)
+        saved_shapes[f"{key}_seeds_timestep"] = seeds_ts.shape
 
-    spectral_mean, spectral_std, spectral_n = nanmean_std_with_flag_optional(spectral_raw)
-    spectral_no_qk_mean, spectral_no_qk_std, spectral_no_qk_n = nanmean_std_with_flag_optional(spectral_no_qk_raw)
-    l2_mean, l2_std, l2_n = nanmean_std_with_flag_optional(l2_raw)
+    # New M_l epoch and timestep outputs.
+    for split in RHM_SPLITS:
+        for key in RHM_ML_VECTOR_KEYS:
+            name = f"{split}_{key}"
+            seeds, mean, std, n = _add_metric_result(result, name, ml_raw[name], timestep=False)
+            saved_shapes[f"{name}_seeds"] = seeds.shape
 
-    margin_min_mean, margin_min_std, margin_min_n = nanmean_std_with_flag_optional(margin_min_raw)
-    margin_mean_mean, margin_mean_std, margin_mean_n = nanmean_std_with_flag_optional(margin_mean_raw)
-    margin_max_mean, margin_max_std, margin_max_n = nanmean_std_with_flag_optional(margin_max_raw)
-    margin_std_mean, margin_std_std, margin_std_n = nanmean_std_with_flag_optional(margin_std_raw)
+            seeds_ts, mean_ts, std_ts, n_ts = _add_metric_result(result, name, ml_raw_timestep[name], timestep=True)
+            saved_shapes[f"{name}_seeds_timestep"] = seeds_ts.shape
 
-    # -----------------------------
-    # Aggregate timestep arrays over seed axis=1
-    # -----------------------------
-    trainloss_timestep_mean, trainloss_timestep_std, trainloss_timestep_n = nanmean_std_with_flag_optional(trainloss_timestep_raw)
-    trainacc_timestep_mean, trainacc_timestep_std, trainacc_timestep_n = nanmean_std_with_flag_optional(trainacc_timestep_raw)
-    trainerr_timestep_mean, trainerr_timestep_std, trainerr_timestep_n = nanmean_std_with_flag_optional(trainerr_timestep_raw)
+        # Metadata: levels and number of evaluated samples.
+        levels_name = f"{split}_rhm_levels"
+        result[f"{levels_name}_raw"] = ml_raw[levels_name]
+        result[f"{levels_name}_seeds"] = _transpose_seed_axis(ml_raw[levels_name])
+        result[f"{levels_name}_timestep_raw"] = ml_raw_timestep[levels_name]
+        result[f"{levels_name}_seeds_timestep"] = _transpose_seed_axis(ml_raw_timestep[levels_name])
 
-    testloss_timestep_mean, testloss_timestep_std, testloss_timestep_n = nanmean_std_with_flag_optional(testloss_timestep_raw)
-    testacc_timestep_mean, testacc_timestep_std, testacc_timestep_n = nanmean_std_with_flag_optional(testacc_timestep_raw)
-    err_timestep_mean, err_timestep_std, err_timestep_n = nanmean_std_with_flag_optional(err_timestep_raw)
+        ns_name = f"{split}_rhm_margin_num_samples"
+        result[f"{ns_name}_raw"] = ml_raw[ns_name]
+        result[f"{ns_name}_seeds"] = _transpose_seed_axis(ml_raw[ns_name])
+        result[f"{ns_name}_timestep_raw"] = ml_raw_timestep[ns_name]
+        result[f"{ns_name}_seeds_timestep"] = _transpose_seed_axis(ml_raw_timestep[ns_name])
 
-    spectral_timestep_mean, spectral_timestep_std, spectral_timestep_n = nanmean_std_with_flag_optional(spectral_timestep_raw)
-    spectral_no_qk_timestep_mean, spectral_no_qk_timestep_std, spectral_no_qk_timestep_n = nanmean_std_with_flag_optional(spectral_no_qk_timestep_raw)
-    l2_timestep_mean, l2_timestep_std, l2_timestep_n = nanmean_std_with_flag_optional(l2_timestep_raw)
-
-    margin_min_timestep_mean, margin_min_timestep_std, margin_min_timestep_n = nanmean_std_with_flag_optional(margin_min_timestep_raw)
-    margin_mean_timestep_mean, margin_mean_timestep_std, margin_mean_timestep_n = nanmean_std_with_flag_optional(margin_mean_timestep_raw)
-    margin_max_timestep_mean, margin_max_timestep_std, margin_max_timestep_n = nanmean_std_with_flag_optional(margin_max_timestep_raw)
-    margin_std_timestep_mean, margin_std_timestep_std, margin_std_timestep_n = nanmean_std_with_flag_optional(margin_std_timestep_raw)
-
-    # Scalar summaries
+    # Scalar summaries.
     best_loss_mean, best_loss_std, best_loss_n = nanmean_std_with_flag(best_loss_raw, axis=1)
     best_acc_mean, best_acc_std, best_acc_n = nanmean_std_with_flag(best_acc_raw, axis=1)
     best_epoch_mean, best_epoch_std, best_epoch_n = nanmean_std_with_flag(best_epoch_raw, axis=1)
     last_saved_epoch_mean, last_saved_epoch_std, last_saved_epoch_n = nanmean_std_with_flag(last_saved_epoch_raw, axis=1)
 
-    # -----------------------------
-    # Seed-resolved arrays: shape (nP, nT, max_seeds)
-    # -----------------------------
-    trainloss_seeds = np.transpose(trainloss_raw, (0, 2, 1))
-    trainacc_seeds = np.transpose(trainacc_raw, (0, 2, 1))
-    trainerr_seeds = np.transpose(trainerr_raw, (0, 2, 1))
-
-    testloss_seeds = np.transpose(testloss_raw, (0, 2, 1))
-    testacc_seeds = np.transpose(testacc_raw, (0, 2, 1))
-    err_seeds = np.transpose(err_raw, (0, 2, 1))
-
-    spectral_seeds = np.transpose(spectral_raw, (0, 2, 1))
-    spectral_no_qk_seeds = np.transpose(spectral_no_qk_raw, (0, 2, 1))
-    l2_seeds = np.transpose(l2_raw, (0, 2, 1))
-
-    margin_min_seeds = np.transpose(margin_min_raw, (0, 2, 1))
-    margin_mean_seeds = np.transpose(margin_mean_raw, (0, 2, 1))
-    margin_max_seeds = np.transpose(margin_max_raw, (0, 2, 1))
-    margin_std_seeds = np.transpose(margin_std_raw, (0, 2, 1))
-
-    # -----------------------------
-    # Timestep seed-resolved arrays: shape (nP, nTs, max_seeds)
-    # -----------------------------
-    trainloss_seeds_timestep = np.transpose(trainloss_timestep_raw, (0, 2, 1))
-    trainacc_seeds_timestep = np.transpose(trainacc_timestep_raw, (0, 2, 1))
-    trainerr_seeds_timestep = np.transpose(trainerr_timestep_raw, (0, 2, 1))
-
-    testloss_seeds_timestep = np.transpose(testloss_timestep_raw, (0, 2, 1))
-    testacc_seeds_timestep = np.transpose(testacc_timestep_raw, (0, 2, 1))
-    err_seeds_timestep = np.transpose(err_timestep_raw, (0, 2, 1))
-
-    spectral_seeds_timestep = np.transpose(spectral_timestep_raw, (0, 2, 1))
-    spectral_no_qk_seeds_timestep = np.transpose(spectral_no_qk_timestep_raw, (0, 2, 1))
-    l2_seeds_timestep = np.transpose(l2_timestep_raw, (0, 2, 1))
-
-    margin_min_seeds_timestep = np.transpose(margin_min_timestep_raw, (0, 2, 1))
-    margin_mean_seeds_timestep = np.transpose(margin_mean_timestep_raw, (0, 2, 1))
-    margin_max_seeds_timestep = np.transpose(margin_max_timestep_raw, (0, 2, 1))
-    margin_std_seeds_timestep = np.transpose(margin_std_timestep_raw, (0, 2, 1))
-
-    T_arr = epoch_values.copy()
-    T_arr_timestep = timestep_values.copy()
-
-    result = {
-        # identifiers
-        "run_name": np.array(args.run_name),
-        "experiment_name": np.array(experiment_name),
-
-        # fixed experiment parameters
-        "fixed_params": np.array(ref, dtype=object),
-
-        # axes
-        "P_values": P_values,                       # shape (nP,)
-        "epoch_values": epoch_values,               # shape (nT,)
-        "T_arr": T_arr,                             # shape (nT,)
-        "timestep_values": timestep_values,         # shape (nTs,)
-        "T_arr_timestep": T_arr_timestep,           # shape (nTs,)
-        "num_seeds": num_seeds,                     # shape (nP,)
-        "seed_triplets": seed_triplets,             # shape (nP, max_seeds, 3)
-
-        # raw epoch curves per seed
-        "trainloss_raw": trainloss_raw,             # shape (nP, max_seeds, nT)
-        "trainacc_raw": trainacc_raw,
-        "trainerr_raw": trainerr_raw,
-
-        "testloss_raw": testloss_raw,
-        "testacc_raw": testacc_raw,
-        "err_raw": err_raw,
-
-        "spectral_raw": spectral_raw,
-        "spectral_no_qk_raw": spectral_no_qk_raw,
-        "l2_raw": l2_raw,
-
-        "margin_min_raw": margin_min_raw,
-        "margin_mean_raw": margin_mean_raw,
-        "margin_max_raw": margin_max_raw,
-        "margin_std_raw": margin_std_raw,
-
-        # raw timestep curves per seed
-        "trainloss_timestep_raw": trainloss_timestep_raw,   # shape (nP, max_seeds, nTs)
-        "trainacc_timestep_raw": trainacc_timestep_raw,
-        "trainerr_timestep_raw": trainerr_timestep_raw,
-
-        "testloss_timestep_raw": testloss_timestep_raw,
-        "testacc_timestep_raw": testacc_timestep_raw,
-        "err_timestep_raw": err_timestep_raw,
-
-        "spectral_timestep_raw": spectral_timestep_raw,
-        "spectral_no_qk_timestep_raw": spectral_no_qk_timestep_raw,
-        "l2_timestep_raw": l2_timestep_raw,
-
-        "margin_min_timestep_raw": margin_min_timestep_raw,
-        "margin_mean_timestep_raw": margin_mean_timestep_raw,
-        "margin_max_timestep_raw": margin_max_timestep_raw,
-        "margin_std_timestep_raw": margin_std_timestep_raw,
-
-        # seed-resolved epoch arrays
-        "trainloss_seeds": trainloss_seeds,               # shape (nP, nT, max_seeds)
-        "trainacc_seeds": trainacc_seeds,
-        "trainerr_seeds": trainerr_seeds,
-
-        "testloss_seeds": testloss_seeds,
-        "testacc_seeds": testacc_seeds,
-        "err_seeds": err_seeds,
-
-        "spectral_seeds": spectral_seeds,
-        "spectral_no_qk_seeds": spectral_no_qk_seeds,
-        "l2_seeds": l2_seeds,
-
-        "margin_min_seeds": margin_min_seeds,
-        "margin_mean_seeds": margin_mean_seeds,
-        "margin_max_seeds": margin_max_seeds,
-        "margin_std_seeds": margin_std_seeds,
-
-        # seed-resolved timestep arrays
-        "trainloss_seeds_timestep": trainloss_seeds_timestep,   # shape (nP, nTs, max_seeds)
-        "trainacc_seeds_timestep": trainacc_seeds_timestep,
-        "trainerr_seeds_timestep": trainerr_seeds_timestep,
-
-        "testloss_seeds_timestep": testloss_seeds_timestep,
-        "testacc_seeds_timestep": testacc_seeds_timestep,
-        "err_seeds_timestep": err_seeds_timestep,
-
-        "spectral_seeds_timestep": spectral_seeds_timestep,
-        "spectral_no_qk_seeds_timestep": spectral_no_qk_seeds_timestep,
-        "l2_seeds_timestep": l2_seeds_timestep,
-
-        "margin_min_seeds_timestep": margin_min_seeds_timestep,
-        "margin_mean_seeds_timestep": margin_mean_seeds_timestep,
-        "margin_max_seeds_timestep": margin_max_seeds_timestep,
-        "margin_std_seeds_timestep": margin_std_seeds_timestep,
-
-        # aggregated epoch curves
-        "trainloss_mean": trainloss_mean,           # shape (nP, nT)
-        "trainloss_std": trainloss_std,
-        "trainloss_n": trainloss_n,
-
-        "trainacc_mean": trainacc_mean,
-        "trainacc_std": trainacc_std,
-        "trainacc_n": trainacc_n,
-
-        "trainerr_mean": trainerr_mean,
-        "trainerr_std": trainerr_std,
-        "trainerr_n": trainerr_n,
-
-        "testloss_mean": testloss_mean,
-        "testloss_std": testloss_std,
-        "testloss_n": testloss_n,
-
-        "testacc_mean": testacc_mean,
-        "testacc_std": testacc_std,
-        "testacc_n": testacc_n,
-
-        "err_mean": err_mean,
-        "err_std": err_std,
-        "err_n": err_n,
-
-        "spectral_mean": spectral_mean,
-        "spectral_std": spectral_std,
-        "spectral_n": spectral_n,
-
-        "spectral_no_qk_mean": spectral_no_qk_mean,
-        "spectral_no_qk_std": spectral_no_qk_std,
-        "spectral_no_qk_n": spectral_no_qk_n,
-
-        "l2_mean": l2_mean,
-        "l2_std": l2_std,
-        "l2_n": l2_n,
-
-        "margin_min_mean": margin_min_mean,
-        "margin_min_std": margin_min_std,
-        "margin_min_n": margin_min_n,
-
-        "margin_mean_mean": margin_mean_mean,
-        "margin_mean_std": margin_mean_std,
-        "margin_mean_n": margin_mean_n,
-
-        "margin_max_mean": margin_max_mean,
-        "margin_max_std": margin_max_std,
-        "margin_max_n": margin_max_n,
-
-        "margin_std_mean": margin_std_mean,
-        "margin_std_std": margin_std_std,
-        "margin_std_n": margin_std_n,
-
-        # aggregated timestep curves
-        "trainloss_timestep_mean": trainloss_timestep_mean,   # shape (nP, nTs)
-        "trainloss_timestep_std": trainloss_timestep_std,
-        "trainloss_timestep_n": trainloss_timestep_n,
-
-        "trainacc_timestep_mean": trainacc_timestep_mean,
-        "trainacc_timestep_std": trainacc_timestep_std,
-        "trainacc_timestep_n": trainacc_timestep_n,
-
-        "trainerr_timestep_mean": trainerr_timestep_mean,
-        "trainerr_timestep_std": trainerr_timestep_std,
-        "trainerr_timestep_n": trainerr_timestep_n,
-
-        "testloss_timestep_mean": testloss_timestep_mean,
-        "testloss_timestep_std": testloss_timestep_std,
-        "testloss_timestep_n": testloss_timestep_n,
-
-        "testacc_timestep_mean": testacc_timestep_mean,
-        "testacc_timestep_std": testacc_timestep_std,
-        "testacc_timestep_n": testacc_timestep_n,
-
-        "err_timestep_mean": err_timestep_mean,
-        "err_timestep_std": err_timestep_std,
-        "err_timestep_n": err_timestep_n,
-
-        "spectral_timestep_mean": spectral_timestep_mean,
-        "spectral_timestep_std": spectral_timestep_std,
-        "spectral_timestep_n": spectral_timestep_n,
-
-        "spectral_no_qk_timestep_mean": spectral_no_qk_timestep_mean,
-        "spectral_no_qk_timestep_std": spectral_no_qk_timestep_std,
-        "spectral_no_qk_timestep_n": spectral_no_qk_timestep_n,
-
-        "l2_timestep_mean": l2_timestep_mean,
-        "l2_timestep_std": l2_timestep_std,
-        "l2_timestep_n": l2_timestep_n,
-
-        "margin_min_timestep_mean": margin_min_timestep_mean,
-        "margin_min_timestep_std": margin_min_timestep_std,
-        "margin_min_timestep_n": margin_min_timestep_n,
-
-        "margin_mean_timestep_mean": margin_mean_timestep_mean,
-        "margin_mean_timestep_std": margin_mean_timestep_std,
-        "margin_mean_timestep_n": margin_mean_timestep_n,
-
-        "margin_max_timestep_mean": margin_max_timestep_mean,
-        "margin_max_timestep_std": margin_max_timestep_std,
-        "margin_max_timestep_n": margin_max_timestep_n,
-
-        "margin_std_timestep_mean": margin_std_timestep_mean,
-        "margin_std_timestep_std": margin_std_timestep_std,
-        "margin_std_timestep_n": margin_std_timestep_n,
-
-        # raw scalar summaries per seed
-        "best_loss_raw": best_loss_raw,                 # shape (nP, max_seeds)
+    result.update({
+        "best_loss_raw": best_loss_raw,
         "best_acc_raw": best_acc_raw,
         "best_epoch_raw": best_epoch_raw,
         "last_saved_epoch_raw": last_saved_epoch_raw,
-
-        # aggregated scalar summaries over seeds
-        "best_loss_mean": best_loss_mean,               # shape (nP,)
+        "best_loss_mean": best_loss_mean,
         "best_loss_std": best_loss_std,
         "best_loss_n": best_loss_n,
-
         "best_acc_mean": best_acc_mean,
         "best_acc_std": best_acc_std,
         "best_acc_n": best_acc_n,
-
         "best_epoch_mean": best_epoch_mean,
         "best_epoch_std": best_epoch_std,
         "best_epoch_n": best_epoch_n,
-
         "last_saved_epoch_mean": last_saved_epoch_mean,
         "last_saved_epoch_std": last_saved_epoch_std,
         "last_saved_epoch_n": last_saved_epoch_n,
-
-        # optional traceability
-        "file_index": file_index,                       # shape (nP, max_seeds)
-    }
+        "file_index": file_index,
+    })
 
     np.save(save_path, result, allow_pickle=True)
 
@@ -724,33 +597,48 @@ def main():
     print(f"Global timestep checkpoints: {timestep_values.tolist()}")
     print(f"num_seeds per P: {num_seeds.tolist()}")
 
-    print(f"trainloss_seeds shape: {trainloss_seeds.shape}")
-    print(f"trainacc_seeds shape: {trainacc_seeds.shape}")
-    print(f"trainerr_seeds shape: {trainerr_seeds.shape}")
-    print(f"testloss_seeds shape: {testloss_seeds.shape}")
-    print(f"testacc_seeds shape: {testacc_seeds.shape}")
-    print(f"err_seeds shape: {err_seeds.shape}")
-    print(f"spectral_seeds shape: {spectral_seeds.shape}")
-    print(f"spectral_no_qk_seeds shape: {spectral_no_qk_seeds.shape}")
-    print(f"l2_seeds shape: {l2_seeds.shape}")
-    print(f"margin_min_seeds shape: {margin_min_seeds.shape}")
-    print(f"margin_mean_seeds shape: {margin_mean_seeds.shape}")
-    print(f"margin_max_seeds shape: {margin_max_seeds.shape}")
-    print(f"margin_std_seeds shape: {margin_std_seeds.shape}")
+    print(f"trainloss_seeds shape: {result['trainloss_seeds'].shape}")
+    print(f"trainacc_seeds shape: {result['trainacc_seeds'].shape}")
+    print(f"trainerr_seeds shape: {result['trainerr_seeds'].shape}")
+    print(f"testloss_seeds shape: {result['testloss_seeds'].shape}")
+    print(f"testacc_seeds shape: {result['testacc_seeds'].shape}")
+    print(f"err_seeds shape: {result['err_seeds'].shape}")
+    print(f"spectral_seeds shape: {result['spectral_seeds'].shape}")
+    print(f"spectral_no_qk_seeds shape: {result['spectral_no_qk_seeds'].shape}")
+    print(f"l2_seeds shape: {result['l2_seeds'].shape}")
+    print(f"margin_min_seeds shape: {result['margin_min_seeds'].shape}")
+    print(f"margin_mean_seeds shape: {result['margin_mean_seeds'].shape}")
+    print(f"margin_max_seeds shape: {result['margin_max_seeds'].shape}")
+    print(f"margin_std_seeds shape: {result['margin_std_seeds'].shape}")
 
-    print(f"trainloss_seeds_timestep shape: {trainloss_seeds_timestep.shape}")
-    print(f"trainacc_seeds_timestep shape: {trainacc_seeds_timestep.shape}")
-    print(f"trainerr_seeds_timestep shape: {trainerr_seeds_timestep.shape}")
-    print(f"testloss_seeds_timestep shape: {testloss_seeds_timestep.shape}")
-    print(f"testacc_seeds_timestep shape: {testacc_seeds_timestep.shape}")
-    print(f"err_seeds_timestep shape: {err_seeds_timestep.shape}")
-    print(f"spectral_seeds_timestep shape: {spectral_seeds_timestep.shape}")
-    print(f"spectral_no_qk_seeds_timestep shape: {spectral_no_qk_seeds_timestep.shape}")
-    print(f"l2_seeds_timestep shape: {l2_seeds_timestep.shape}")
-    print(f"margin_min_seeds_timestep shape: {margin_min_seeds_timestep.shape}")
-    print(f"margin_mean_seeds_timestep shape: {margin_mean_seeds_timestep.shape}")
-    print(f"margin_max_seeds_timestep shape: {margin_max_seeds_timestep.shape}")
-    print(f"margin_std_seeds_timestep shape: {margin_std_seeds_timestep.shape}")
+    if n_ml_levels > 0:
+        print(f"RHM M_l diagnostics detected with L={n_ml_levels}")
+        for split in RHM_SPLITS:
+            print(f"{split}_rhm_M_mean_seeds shape: {result[f'{split}_rhm_M_mean_seeds'].shape}")
+            print(f"{split}_rhm_M_pos_frac_seeds shape: {result[f'{split}_rhm_M_pos_frac_seeds'].shape}")
+            print(f"{split}_rhm_survival_mean_seeds shape: {result[f'{split}_rhm_survival_mean_seeds'].shape}")
+            print(f"{split}_rhm_level_penalty_mean_seeds shape: {result[f'{split}_rhm_level_penalty_mean_seeds'].shape}")
+    else:
+        print("RHM M_l diagnostics not detected in epoch dynamics; saved empty arrays with L=0.")
+
+    print(f"trainloss_seeds_timestep shape: {result['trainloss_seeds_timestep'].shape}")
+    print(f"trainacc_seeds_timestep shape: {result['trainacc_seeds_timestep'].shape}")
+    print(f"trainerr_seeds_timestep shape: {result['trainerr_seeds_timestep'].shape}")
+    print(f"testloss_seeds_timestep shape: {result['testloss_seeds_timestep'].shape}")
+    print(f"testacc_seeds_timestep shape: {result['testacc_seeds_timestep'].shape}")
+    print(f"err_seeds_timestep shape: {result['err_seeds_timestep'].shape}")
+    print(f"spectral_seeds_timestep shape: {result['spectral_seeds_timestep'].shape}")
+    print(f"spectral_no_qk_seeds_timestep shape: {result['spectral_no_qk_seeds_timestep'].shape}")
+    print(f"l2_seeds_timestep shape: {result['l2_seeds_timestep'].shape}")
+    print(f"margin_min_seeds_timestep shape: {result['margin_min_seeds_timestep'].shape}")
+    print(f"margin_mean_seeds_timestep shape: {result['margin_mean_seeds_timestep'].shape}")
+    print(f"margin_max_seeds_timestep shape: {result['margin_max_seeds_timestep'].shape}")
+    print(f"margin_std_seeds_timestep shape: {result['margin_std_seeds_timestep'].shape}")
+
+    if n_ml_levels_timestep > 0:
+        print(f"RHM M_l timestep diagnostics detected with L={n_ml_levels_timestep}")
+        for split in RHM_SPLITS:
+            print(f"{split}_rhm_M_mean_seeds_timestep shape: {result[f'{split}_rhm_M_mean_seeds_timestep'].shape}")
 
 
 if __name__ == "__main__":
