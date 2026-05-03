@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N rhm_L4_uniform
 #PBS -q gpuq-longrun
-#PBS -J 0-15
+#PBS -J 0-12
 #PBS -l select=1:ncpus=4:ngpus=1:mem=16gb
 #PBS -l walltime=200:00:00
 #PBS -j oe
@@ -48,17 +48,23 @@ NUM_TOKENS="${NUM_TOKENS:-16}"
 DEPTH="${DEPTH:-4}"
 NUM_HEADS="${NUM_HEADS:-16}"
 EMBEDDING_DIM="${EMBEDDING_DIM:-512}"
-LR="${LR:-1e-4}"
+LR="${LR:-5e-4}"
 SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
 
 # Training / logging
 TEST_SIZE="${TEST_SIZE:-32768}"
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
-MAX_EPOCHS="${MAX_EPOCHS:-128}"
+MAX_EPOCHS="${MAX_EPOCHS:-256}"
 PRINT_FREQ="${PRINT_FREQ:-1}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
+
+# Optional RHM level-wise M_l diagnostics
+COMPUTE_M_l="${COMPUTE_M_l:-false}"
+M_l_MAX_TRAIN_SAMPLES="${M_l_MAX_TRAIN_SAMPLES:-16384}"
+M_l_MAX_TEST_SAMPLES="${M_l_MAX_TEST_SAMPLES:-16384}"
+M_l_BATCH_SIZE="${M_l_BATCH_SIZE:-1024}"
 
 # ---------------------------------------------------------------
 # Explicit train sizes (5 plateau-centered values, rounded to 128)
@@ -69,9 +75,6 @@ LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
 # and one point after the fourth step gives the following explicit sizes:
 P_STEPS=(146 2341 37449 599186)
 TRAIN_SIZES=(
-  37
-  74
-  146
   292
   585
   1170
@@ -177,6 +180,10 @@ ARRAY_LOG="$REPO_DIR/pbs_logs/array_${JOB_ID}_idx_${ARRAY_INDEX}_P_${TRAIN_SIZE}
     echo "[INFO] theoretical_P_steps_float=$P_STEPS_FLOAT"
     echo "[INFO] plateau_midpoints_float=$PLATEAU_FLOAT"
     echo "[INFO] explicit_train_sizes=${TRAIN_SIZES[*]}"
+    echo "[INFO] compute_M_l=$COMPUTE_M_l"
+    echo "[INFO] M_l_max_train_samples=$M_l_MAX_TRAIN_SAMPLES"
+    echo "[INFO] M_l_max_test_samples=$M_l_MAX_TEST_SAMPLES"
+    echo "[INFO] M_l_batch_size=$M_l_BATCH_SIZE"
     if command -v nvidia-smi >/dev/null 2>&1; then
         echo "[INFO] nvidia-smi:"
         nvidia-smi || true
@@ -228,6 +235,23 @@ CMD=(
     --seed_model "$SEED_MODEL"
     --tag "$TAG"
 )
+
+case "${COMPUTE_M_l,,}" in
+    true|1|yes|y)
+        CMD+=(
+            --compute_rhm_margins
+            --rhm_margins_max_train_samples "$M_l_MAX_TRAIN_SAMPLES"
+            --rhm_margins_max_test_samples "$M_l_MAX_TEST_SAMPLES"
+            --rhm_margins_batch_size "$M_l_BATCH_SIZE"
+        )
+        ;;
+    false|0|no|n)
+        ;;
+    *)
+        echo "[ERROR] Invalid COMPUTE_M_l value: $COMPUTE_M_l" | tee -a "$ARRAY_LOG"
+        exit 1
+        ;;
+esac
 
 {
     echo "[CMD] ${CMD[*]}"

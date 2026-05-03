@@ -601,7 +601,7 @@ def plot_hierarchy_observables(
         (A_mass, 'Mean mass on $A_\ell$', 'mass on $A_\ell$'),
         (margin, 'Mean level margin $M_\ell$', '$M_\ell$'),
         (margin_pos, 'Fraction with $M_\ell>0$', 'fraction'),
-        (hier_acc, 'Hierarchical accuracy', '$\Pr[\arg\max q \in A_\ell]$'),
+        (hier_acc, 'Hierarchical accuracy', 'Pr[argmax q \in A_l]'),
     ]
 
     pos = x[x > 0]
