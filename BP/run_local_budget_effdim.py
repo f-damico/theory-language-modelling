@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run constrained-message oracle belief propagation on a sampled RHM instance and
+Run constrained-message oracle belief propagation (EFFECTIVE-DIMENSION VERSION) on a sampled RHM instance and
 sweep a range of local-message budgets lambdas.
 
 This is the local-budget version: `lambda_values` are per-message centered-logit
@@ -350,6 +350,73 @@ def hierarchical_logit_geometry_scores(
     return r2, r2_shuffled, r_bar
 
 
+
+def _effective_dimensions_from_eigvals(eigvals: np.ndarray, eps: float = 1e-12) -> Tuple[float, float]:
+    """
+    Effective dimensions from the eigenvalues of the covariance of centered logits.
+
+    Returns:
+      - entropy effective dimension: exp(H(p)), p_a = eig_a / sum eig
+      - participation-ratio dimension: (sum eig)^2 / sum eig^2
+    """
+    eigvals = np.asarray(eigvals, dtype=np.float64)
+    eigvals = np.maximum(eigvals, 0.0)
+    total = float(np.sum(eigvals))
+    if (not np.isfinite(total)) or total <= eps:
+        return 0.0, 0.0
+
+    weights = eigvals / total
+    weights_pos = weights[weights > eps]
+    if weights_pos.size == 0:
+        d_entropy = 0.0
+    else:
+        d_entropy = float(np.exp(-np.sum(weights_pos * np.log(weights_pos))))
+
+    denom = float(np.sum(eigvals * eigvals))
+    d_pr = float((total * total) / denom) if denom > eps else 0.0
+    return d_entropy, d_pr
+
+
+def _logit_cloud_effective_dimension_from_sums(
+    sum_z: np.ndarray,
+    sum_zz: np.ndarray,
+    n: int,
+    eps: float = 1e-12,
+) -> Dict[str, Any]:
+    """
+    Compute the effective dimension of the BP output-logit cloud without storing logits.
+
+    During the sweep we accumulate, for one lambda,
+
+        sum_z  = sum_mu z_mu
+        sum_zz = sum_mu z_mu z_mu^T
+
+    with z_mu = log p_mu - mean_j log p_mu_j.  From these two sufficient
+    statistics we build the covariance across test inputs,
+
+        Cov[z] = E[z z^T] - E[z] E[z]^T,
+
+    and compute its effective rank.  Memory is O(V^2), not O(N_test V).
+    """
+    if n <= 0:
+        raise ValueError("Cannot compute logit effective dimension with n <= 0.")
+
+    mean_z = np.asarray(sum_z, dtype=np.float64) / float(n)
+    second_moment = np.asarray(sum_zz, dtype=np.float64) / float(n)
+    cov = second_moment - np.outer(mean_z, mean_z)
+    cov = 0.5 * (cov + cov.T)  # numerical symmetrization
+
+    eigvals = np.linalg.eigvalsh(cov)
+    eigvals = np.maximum(eigvals, 0.0)
+    d_entropy, d_pr = _effective_dimensions_from_eigvals(eigvals, eps=eps)
+
+    return {
+        "logit_input_variance": float(np.trace(cov)),
+        "logit_effdim_entropy": float(d_entropy),
+        "logit_effdim_pr": float(d_pr),
+        "logit_cov_eigvals": eigvals,
+    }
+
 def build_inverse_rule_maps(rules: Sequence[np.ndarray]) -> List[Dict[Tuple[int, ...], int]]:
     inverse_maps: List[Dict[Tuple[int, ...], int]] = []
     for level_rules in rules:
@@ -457,6 +524,14 @@ def evaluate_bp_on_sequences(
     R2_sum = np.zeros(num_levels, dtype=np.float64)
     R2_shuffled_sum = np.zeros(num_levels, dtype=np.float64)
     R_bar_sum = np.zeros(num_levels, dtype=np.float64)
+
+    # Online sufficient statistics for the geometry of the full BP logit function.
+    # We do NOT store all logits. For each lambda we only keep sum z and sum z z^T.
+    q_dim = int(num_features)
+    logit_sum_z = np.zeros(q_dim, dtype=np.float64)
+    logit_sum_zz = np.zeros((q_dim, q_dim), dtype=np.float64)
+    logit_energy_sum = 0.0
+
     residual_sum = 0.0
     recon_abs_err_sum = 0.0
 
@@ -475,6 +550,13 @@ def evaluate_bp_on_sequences(
         losses.append(loss)
         errors.append(float(pred != int(xi[-1])))
         posterior_norms.append(centered_logit_l2_norm(posterior))
+
+        # Centered posterior logits z_mu = log p_mu - mean_j log p_mu_j.
+        # These are accumulated online to compute the covariance over test inputs.
+        z_centered = centered_logits_from_prob(posterior)
+        logit_sum_z += z_centered
+        logit_sum_zz += np.outer(z_centered, z_centered)
+        logit_energy_sum += float(np.dot(z_centered, z_centered))
 
         R2_this, R2_shuffled_this, R_bar_this = hierarchical_logit_geometry_scores(
             posterior=posterior,
@@ -509,6 +591,12 @@ def evaluate_bp_on_sequences(
         recon_abs_err_sum += abs(reconstructed - loss)
 
     n = float(len(sequences))
+    logit_cloud_stats = _logit_cloud_effective_dimension_from_sums(
+        sum_z=logit_sum_z,
+        sum_zz=logit_sum_zz,
+        n=int(len(sequences)),
+    )
+
     return {
         'lambda': float(lambda_msg),
         'loss_mean': float(np.mean(losses)),
@@ -527,6 +615,13 @@ def evaluate_bp_on_sequences(
         'R2_mean': R2_sum / n,
         'R2_shuffled_mean': R2_shuffled_sum / n,
         'R_bar_mean': R_bar_sum / n,
+        'logit_energy_mean': float(logit_energy_sum / n),
+        'logit_input_variance': logit_cloud_stats['logit_input_variance'],
+        'logit_effdim_entropy': logit_cloud_stats['logit_effdim_entropy'],
+        'logit_effdim_pr': logit_cloud_stats['logit_effdim_pr'],
+        'logit_effdim_entropy_norm': float(logit_cloud_stats['logit_effdim_entropy'] / max(q_dim - 1, 1)),
+        'logit_effdim_pr_norm': float(logit_cloud_stats['logit_effdim_pr'] / max(q_dim - 1, 1)),
+        'logit_cov_eigvals': logit_cloud_stats['logit_cov_eigvals'],
         'residual_mean': float(residual_sum / n),
         'reconstructed_loss_abs_error_mean': float(recon_abs_err_sum / n),
     }
@@ -653,6 +748,13 @@ def simulate_bp_lambda_sweep(
             ], axis=1),
             axis=1,
         ),
+        'logit_energy_mean': np.array([r['logit_energy_mean'] for r in sweep], dtype=np.float64),
+        'logit_input_variance': np.array([r['logit_input_variance'] for r in sweep], dtype=np.float64),
+        'logit_effdim_entropy': np.array([r['logit_effdim_entropy'] for r in sweep], dtype=np.float64),
+        'logit_effdim_pr': np.array([r['logit_effdim_pr'] for r in sweep], dtype=np.float64),
+        'logit_effdim_entropy_norm': np.array([r['logit_effdim_entropy_norm'] for r in sweep], dtype=np.float64),
+        'logit_effdim_pr_norm': np.array([r['logit_effdim_pr_norm'] for r in sweep], dtype=np.float64),
+        'logit_cov_eigvals': np.stack([r['logit_cov_eigvals'] for r in sweep], axis=0),
         'residual_mean': np.array([r['residual_mean'] for r in sweep], dtype=np.float64),
         'reconstructed_loss_abs_error_mean': np.array([r['reconstructed_loss_abs_error_mean'] for r in sweep], dtype=np.float64),
         'raw_per_lambda': sweep,
@@ -669,7 +771,9 @@ def simulate_bp_lambda_sweep(
             'selected layer. The tree itself is exactly the repo tree for the same seed_rules. Hierarchy '
             'observables are computed from the final BP posterior and the exact RHM-compatible sets A_l, B_l. '
             'R2 measures the fraction of centered posterior-logit energy explained by the nested block partition '
-            '{B_1,...,B_l,A_l}; R_bar=(R2-R2_shuffled)/(1-R2_shuffled) uses the analytic shuffled baseline.'
+            '{B_1,...,B_l,A_l}; R_bar=(R2-R2_shuffled)/(1-R2_shuffled) uses the analytic shuffled baseline. '
+            'The logit effective-dimension diagnostics are computed online from sum_z and sum_zz over test inputs, '
+            'so full logits are not saved.'
         ),
     }
     return results
@@ -799,6 +903,61 @@ def plot_logit_geometry_observables(
     return fig, axs
 
 
+
+def plot_logit_effective_dimension(
+    results: Dict[str, Any],
+    save_prefix: Optional[Path] = None,
+) -> Tuple[plt.Figure, np.ndarray]:
+    """Plot effective dimension diagnostics of the centered BP logit cloud."""
+    required = [
+        'logit_energy_mean',
+        'logit_input_variance',
+        'logit_effdim_entropy',
+        'logit_effdim_pr',
+        'logit_effdim_entropy_norm',
+        'logit_effdim_pr_norm',
+    ]
+    missing = [k for k in required if k not in results]
+    if missing:
+        raise KeyError(
+            f"Missing effective-dimension keys {missing}. Re-run simulate_bp_lambda_sweep "
+            "with the modified run_local_budget.py."
+        )
+
+    x = np.asarray(results['lambda_values'], dtype=np.float64)
+    pos = x[x > 0]
+    linthresh = max(float(np.min(pos)) / 2.0, 1e-6) if pos.size > 0 else 1e-6
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+
+    axs[0].plot(x, results['logit_energy_mean'], marker='o', label=r'$E\|\tilde z\|^2$')
+    axs[0].plot(x, results['logit_input_variance'], marker='s', label=r'$\mathrm{Tr}\,\mathrm{Cov}(\tilde z)$')
+    axs[0].set_title('Logit energy / input variance')
+    axs[0].set_ylabel('energy')
+    axs[0].legend()
+
+    axs[1].plot(x, results['logit_effdim_entropy'], marker='o', label='entropy eff. dim.')
+    axs[1].plot(x, results['logit_effdim_pr'], marker='s', label='PR eff. dim.')
+    axs[1].set_title('Effective logit dimension')
+    axs[1].set_ylabel('dimension')
+    axs[1].legend()
+
+    axs[2].plot(x, results['logit_effdim_entropy_norm'], marker='o', label='entropy / (V-1)')
+    axs[2].plot(x, results['logit_effdim_pr_norm'], marker='s', label='PR / (V-1)')
+    axs[2].set_title('Normalized effective dimension')
+    axs[2].set_ylabel('normalized dimension')
+    axs[2].legend()
+
+    for ax in axs:
+        ax.set_xscale('symlog', linthresh=linthresh)
+        ax.set_xlabel('message budget $\lambda$')
+        ax.grid(True, which='both', alpha=0.3)
+
+    fig.tight_layout()
+    if save_prefix is not None:
+        fig.savefig(str(save_prefix) + '_logit_effective_dimension_vs_lambda.png', dpi=160, bbox_inches='tight')
+    return fig, axs
+
 def _parse_lambda_values(args: argparse.Namespace) -> np.ndarray:
     if args.lambda_values is not None:
         vals = [float(x) for x in args.lambda_values.split(',') if x.strip()]
@@ -876,6 +1035,13 @@ def main() -> None:
         R_bar_mean=results['R_bar_mean'],
         R2_delta_mean=results['R2_delta_mean'],
         R_bar_delta_mean=results['R_bar_delta_mean'],
+        logit_energy_mean=results['logit_energy_mean'],
+        logit_input_variance=results['logit_input_variance'],
+        logit_effdim_entropy=results['logit_effdim_entropy'],
+        logit_effdim_pr=results['logit_effdim_pr'],
+        logit_effdim_entropy_norm=results['logit_effdim_entropy_norm'],
+        logit_effdim_pr_norm=results['logit_effdim_pr_norm'],
+        logit_cov_eigvals=results['logit_cov_eigvals'],
         residual_mean=results['residual_mean'],
         reconstructed_loss_abs_error_mean=results['reconstructed_loss_abs_error_mean'],
         params_json=json.dumps(results['params']),
@@ -892,15 +1058,19 @@ def main() -> None:
     print('hierarchical accuracy:\n', results['hier_acc'])
     print('R2 mean:\n', results['R2_mean'])
     print('R_bar mean:\n', results['R_bar_mean'])
+    print('logit entropy effective dimension:', results['logit_effdim_entropy'])
+    print('logit PR effective dimension:', results['logit_effdim_pr'])
     print('mean abs reconstruction error of grouped loss decomposition:', results['reconstructed_loss_abs_error_mean'])
 
     if not args.no_plots:
         plot_both(results, save_prefix=out_prefix)
         plot_hierarchy_observables(results, save_prefix=out_prefix)
         plot_logit_geometry_observables(results, save_prefix=out_prefix)
+        plot_logit_effective_dimension(results, save_prefix=out_prefix)
         print('Saved plot to', str(out_prefix) + '_loss_error_vs_lambda.png')
         print('Saved plot to', str(out_prefix) + '_hierarchy_observables_vs_lambda.png')
         print('Saved plot to', str(out_prefix) + '_logit_geometry_vs_lambda.png')
+        print('Saved plot to', str(out_prefix) + '_logit_effective_dimension_vs_lambda.png')
 
 
 if __name__ == '__main__':

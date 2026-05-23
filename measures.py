@@ -110,6 +110,189 @@ def get_norm_measures(model):
 
 
 # -----------------------------------------------------------------------------
+# Logit-cloud effective dimension
+# -----------------------------------------------------------------------------
+
+
+def _effective_dimensions_from_covariance(cov: torch.Tensor, eps: float = 1e-12):
+    """
+    Return entropy and participation-ratio effective dimensions from a covariance.
+
+    The eigenvalues are normalized before the entropy effective dimension is
+    computed.  This makes the diagnostic sensitive to the number of active logit
+    directions, not to the overall logit scale.
+    """
+    cov = 0.5 * (cov + cov.T)
+    eigvals = torch.linalg.eigvalsh(cov).detach().cpu().to(torch.float64)
+    eigvals = torch.clamp(eigvals, min=0.0)
+
+    total = eigvals.sum()
+    if (not torch.isfinite(total)) or float(total.item()) <= eps:
+        return 0.0, 0.0, eigvals.numpy()
+
+    weights = eigvals / total
+    weights_pos = weights[weights > eps]
+    entropy_dim = torch.exp(-torch.sum(weights_pos * torch.log(weights_pos)))
+
+    denom = torch.sum(eigvals * eigvals)
+    if (not torch.isfinite(denom)) or float(denom.item()) <= eps:
+        pr_dim = torch.tensor(0.0, dtype=torch.float64)
+    else:
+        pr_dim = (total * total) / denom
+
+    return float(entropy_dim.item()), float(pr_dim.item()), eigvals.numpy()
+
+
+@torch.no_grad()
+def get_logit_effective_dimension_measures(
+    model,
+    dataloader,
+    prefix: str,
+    max_samples: Optional[int] = 4096,
+    batch_size: Optional[int] = None,
+    eps: float = 1e-12,
+) -> Dict[str, object]:
+    """
+    Compute the effective dimension of the centered-output-logit cloud.
+
+    For every input x in a deterministic subset of the dataloader, the model
+    outputs logits z(x).  We fix the softmax gauge by centering the logits over
+    the vocabulary,
+
+        z_tilde(x) = z(x) - mean_j z_j(x),
+
+    and accumulate only
+
+        sum_x z_tilde(x),       sum_x z_tilde(x) z_tilde(x)^T.
+
+    Thus no full [num_samples, vocab_size] logit matrix is stored.  The returned
+    effective dimensions are computed from the covariance over inputs, exactly
+    like the BP logit-cloud diagnostic.
+    """
+    if dataloader is None:
+        return {}
+
+    dataset = dataloader.dataset
+    num_available = len(dataset)
+    if max_samples is not None and int(max_samples) > 0:
+        num_samples = min(int(max_samples), num_available)
+    else:
+        num_samples = num_available
+
+    if num_samples <= 0:
+        return {
+            f'{prefix}logit_energy_mean': float('nan'),
+            f'{prefix}logit_input_variance': float('nan'),
+            f'{prefix}logit_effdim_entropy': float('nan'),
+            f'{prefix}logit_effdim_pr': float('nan'),
+            f'{prefix}logit_effdim_entropy_norm': float('nan'),
+            f'{prefix}logit_effdim_pr_norm': float('nan'),
+            f'{prefix}logit_effdim_num_samples': 0,
+            f'{prefix}logit_cov_eigvals': np.array([], dtype=np.float64),
+        }
+
+    effective_batch_size = int(batch_size or getattr(dataloader, 'batch_size', 1024) or 1024)
+    sampled_subset = torch.utils.data.Subset(dataset, list(range(num_samples)))
+    sampled_loader = torch.utils.data.DataLoader(
+        sampled_subset,
+        batch_size=effective_batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    was_training = model.training
+    model.eval()
+
+    n_seen = 0
+    sum_z = None
+    sum_zz = None
+    energy_sum = 0.0
+
+    for inputs, targets in sampled_loader:
+        logits = model(inputs)
+        if logits.ndim < 2:
+            raise ValueError(f'Expected model logits with at least 2 dimensions, got shape {tuple(logits.shape)}')
+        if logits.ndim > 2:
+            # Keep the last dimension as the vocabulary/logit dimension.  This is
+            # a safe fallback; last-token models normally already return [B, V].
+            logits = logits.reshape(-1, logits.shape[-1])
+
+        z = logits.detach().to(dtype=torch.float64)
+        z = z - z.mean(dim=-1, keepdim=True)
+        z_cpu = z.cpu()
+
+        if sum_z is None:
+            vocab_size = int(z_cpu.shape[-1])
+            sum_z = torch.zeros(vocab_size, dtype=torch.float64)
+            sum_zz = torch.zeros((vocab_size, vocab_size), dtype=torch.float64)
+
+        n_seen += int(z_cpu.shape[0])
+        sum_z += z_cpu.sum(dim=0)
+        sum_zz += z_cpu.T @ z_cpu
+        energy_sum += float(torch.sum(z_cpu * z_cpu).item())
+
+    if was_training:
+        model.train()
+
+    if n_seen <= 0 or sum_z is None or sum_zz is None:
+        return {
+            f'{prefix}logit_energy_mean': float('nan'),
+            f'{prefix}logit_input_variance': float('nan'),
+            f'{prefix}logit_effdim_entropy': float('nan'),
+            f'{prefix}logit_effdim_pr': float('nan'),
+            f'{prefix}logit_effdim_entropy_norm': float('nan'),
+            f'{prefix}logit_effdim_pr_norm': float('nan'),
+            f'{prefix}logit_effdim_num_samples': 0,
+            f'{prefix}logit_cov_eigvals': np.array([], dtype=np.float64),
+        }
+
+    mean_z = sum_z / float(n_seen)
+    second_moment = sum_zz / float(n_seen)
+    cov = second_moment - torch.outer(mean_z, mean_z)
+
+    entropy_dim, pr_dim, eigvals = _effective_dimensions_from_covariance(cov, eps=eps)
+    input_variance = float(torch.trace(cov).item())
+    energy_mean = float(energy_sum / float(n_seen))
+    max_dim = max(int(sum_z.numel()) - 1, 1)
+
+    return {
+        f'{prefix}logit_energy_mean': energy_mean,
+        f'{prefix}logit_input_variance': input_variance,
+        f'{prefix}logit_effdim_entropy': entropy_dim,
+        f'{prefix}logit_effdim_pr': pr_dim,
+        f'{prefix}logit_effdim_entropy_norm': entropy_dim / float(max_dim),
+        f'{prefix}logit_effdim_pr_norm': pr_dim / float(max_dim),
+        f'{prefix}logit_effdim_num_samples': int(n_seen),
+        f'{prefix}logit_cov_eigvals': np.asarray(eigvals, dtype=np.float64),
+    }
+
+
+def get_logit_effective_dimension_measures_for_splits(model, train_loader, test_loader, args) -> Dict[str, object]:
+    """Compute train/test logit-cloud effective dimensions at a checkpoint."""
+    batch_size = getattr(args, 'logit_effdim_batch_size', None) or getattr(args, 'batch_size', None)
+    out = {}
+    out.update(
+        get_logit_effective_dimension_measures(
+            model,
+            train_loader,
+            prefix='train_',
+            max_samples=getattr(args, 'logit_effdim_max_train_samples', 4096),
+            batch_size=batch_size,
+        )
+    )
+    out.update(
+        get_logit_effective_dimension_measures(
+            model,
+            test_loader,
+            prefix='test_',
+            max_samples=getattr(args, 'logit_effdim_max_test_samples', 4096),
+            batch_size=batch_size,
+        )
+    )
+    return out
+
+
+# -----------------------------------------------------------------------------
 # RHM level-wise last-token margins M_l
 # -----------------------------------------------------------------------------
 

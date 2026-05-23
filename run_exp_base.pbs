@@ -1,9 +1,9 @@
 #!/bin/bash
 #PBS -N rhm_transformer
-#PBS -q gpuq
+#PBS -q gpuq-longrun
 #PBS -J 0-8
 #PBS -l select=1:ncpus=4:ngpus=1:mem=8gb
-#PBS -l walltime=8:00:00
+#PBS -l walltime=100:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
@@ -23,7 +23,6 @@ TAG="${TAG:-paper_L3_s2_v32_m8_transformer_bluecurve}"
 
 # Transformer model selection.
 # run_rhm_transformer_single.py currently launches main.py with --model transformer_mla.
-DEPTH="${DEPTH:-3}"
 NUM_HEADS="${NUM_HEADS:-16}"
 # Leave empty to use wrapper default: EMBEDDING_DIM = NUM_HEADS * NUM_FEATURES.
 EMBEDDING_DIM="${EMBEDDING_DIM:-}"
@@ -33,13 +32,17 @@ SEED_RULES="${SEED_RULES:-0}"
 SEED_SAMPLE="${SEED_SAMPLE:-0}"
 SEED_MODEL="${SEED_MODEL:-0}"
 
-# Same RHM setting as the blue curve run.
+##############################################
 NUM_FEATURES="${NUM_FEATURES:-32}"
 NUM_CLASSES="${NUM_CLASSES:-32}"
-NUM_SYNONYMS="${NUM_SYNONYMS:-8}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-4}"
 TUPLE_SIZE="${TUPLE_SIZE:-2}"
-NUM_LAYERS="${NUM_LAYERS:-3}"
-NUM_TOKENS="${NUM_TOKENS:-8}"
+NUM_LAYERS="${NUM_LAYERS:-4}"
+NUM_TOKENS="${NUM_TOKENS:-16}"
+
+DEPTH="${DEPTH:-4}"
+
+##############################################
 
 # Transformer training defaults.
 TEST_SIZE="${TEST_SIZE:-32768}"
@@ -47,8 +50,8 @@ BATCH_SIZE="${BATCH_SIZE:-256}"
 ACCUMULATION="${ACCUMULATION:-0}"
 SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
-MAX_EPOCHS="${MAX_EPOCHS:-128}"
-LR="${LR:-0.005}"
+MAX_EPOCHS="${MAX_EPOCHS:-256}"
+LR="${LR:-0.001}"
 # These are fixed inside run_rhm_transformer_single.py/main.py for transformers.
 OPTIM="${OPTIM:-adam}"
 SCHEDULER="${SCHEDULER:-warmup}"
@@ -75,15 +78,14 @@ M_l_MAX_TEST_SAMPLES="${M_l_MAX_TEST_SAMPLES:-16384}"
 M_l_BATCH_SIZE="${M_l_BATCH_SIZE:-1024}"
 
 TRAIN_SIZES=(
-  256
-  1024
-  4096
-  16384
-  65536
-  262144
-  1048576
+  128
+  512
+  2048
+  8192
+  32768
+  131072
+  524288
   2097152
-  4194304
 )
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"

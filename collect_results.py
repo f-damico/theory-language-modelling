@@ -57,6 +57,23 @@ RHM_ML_VECTOR_KEYS = (
 )
 RHM_SPLITS = ("train", "test")
 
+# Logit-cloud effective dimension diagnostics saved by main.py at checkpoints.
+LOGIT_EFFDIM_SCALAR_KEYS = (
+    "logit_energy_mean",
+    "logit_input_variance",
+    "logit_effdim_entropy",
+    "logit_effdim_pr",
+    "logit_effdim_entropy_norm",
+    "logit_effdim_pr_norm",
+    "logit_effdim_num_samples",
+)
+
+SCALAR_DYNAMICS_KEYS = SCALAR_DYNAMICS_KEYS + tuple(
+    f"{split}_{key}"
+    for split in RHM_SPLITS
+    for key in LOGIT_EFFDIM_SCALAR_KEYS
+)
+
 
 class CPU_Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
@@ -177,6 +194,8 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
                 out[f"{split}_{key}"] = np.full((0, 0), np.nan, dtype=float)
             out[f"{split}_rhm_levels"] = np.full((0, 0), -1, dtype=int)
             out[f"{split}_rhm_margin_num_samples"] = np.array([], dtype=float)
+            for key in LOGIT_EFFDIM_SCALAR_KEYS:
+                out[f"{split}_{key}"] = np.array([], dtype=float)
         return out
 
     times = np.array(
@@ -219,6 +238,11 @@ def dynamics_to_arrays(output, dyn_key="dynamics", time_name="epochs"):
         "margin_std": np.array([d.get(MARGIN_STD_KEY, np.nan) for d in dyn], dtype=float),
         "rhm_num_levels": np.array(n_levels, dtype=int),
     }
+
+    for split in RHM_SPLITS:
+        for key in LOGIT_EFFDIM_SCALAR_KEYS:
+            full_key = f"{split}_{key}"
+            out[full_key] = np.array([d.get(full_key, np.nan) for d in dyn], dtype=float)
 
     for split in RHM_SPLITS:
         for key in RHM_ML_VECTOR_KEYS:
@@ -610,6 +634,8 @@ def main():
     print(f"margin_mean_seeds shape: {result['margin_mean_seeds'].shape}")
     print(f"margin_max_seeds shape: {result['margin_max_seeds'].shape}")
     print(f"margin_std_seeds shape: {result['margin_std_seeds'].shape}")
+    print(f"train_logit_effdim_entropy_seeds shape: {result['train_logit_effdim_entropy_seeds'].shape}")
+    print(f"test_logit_effdim_entropy_seeds shape: {result['test_logit_effdim_entropy_seeds'].shape}")
 
     if n_ml_levels > 0:
         print(f"RHM M_l diagnostics detected with L={n_ml_levels}")

@@ -19,6 +19,12 @@ def _add_rhm_margin_measures(entry, model, train_loader, test_loader, args):
     return entry
 
 
+def _add_logit_effective_dimension_measures(entry, model, train_loader, test_loader, args):
+    # Always computed at the same checkpoints as the other saved dynamics.
+    entry.update(measures.get_logit_effective_dimension_measures_for_splits(model, train_loader, test_loader, args))
+    return entry
+
+
 def run(args):
     # Reduce batch_size when larger than train_size.
     if args.batch_size >= args.train_size:
@@ -70,6 +76,17 @@ def run(args):
             f"rhm_margins_batch_size={args.rhm_margins_batch_size}"
         )
 
+    print(
+        '[INFO] logit effective dimension=True: saving train/test logit_energy_mean, '
+        'logit_input_variance, logit_effdim_entropy, logit_effdim_pr and normalized versions '
+        'at validation checkpoints.'
+    )
+    print(
+        f"[INFO] logit_effdim_max_train_samples={args.logit_effdim_max_train_samples}, "
+        f"logit_effdim_max_test_samples={args.logit_effdim_max_test_samples}, "
+        f"logit_effdim_batch_size={args.logit_effdim_batch_size}"
+    )
+
     def build_timestep_entry(epoch, update, global_update):
         train_loss_step, _ = measures.test(model, train_loader)
         test_loss_step, test_acc_step = measures.test(model, test_loader)
@@ -84,6 +101,7 @@ def run(args):
             'testacc': test_acc_step,
         }
         entry.update(measures.get_norm_measures(model))
+        _add_logit_effective_dimension_measures(entry, model, train_loader, test_loader, args)
         return entry
 
     def make_output(epoch_done):
@@ -96,6 +114,7 @@ def run(args):
             'epoch': epoch_done,
             'save_trainstep_epochs': args.save_trainstep_epochs,
             'compute_rhm_margins': args.compute_rhm_margins,
+            'compute_logit_effdim': True,
         }
 
     if args.print_freq >= 10:
@@ -163,6 +182,7 @@ def run(args):
                 )
 
             _add_rhm_margin_measures(entry, model, train_loader, test_loader, args)
+            _add_logit_effective_dimension_measures(entry, model, train_loader, test_loader, args)
             dynamics.append(entry)
 
             log_message = (
@@ -192,6 +212,15 @@ def run(args):
                 log_message += ', test M_l mean: {}'.format(
                     '[' + ', '.join('{:.3e}'.format(x) for x in entry['test_rhm_M_mean']) + ']'
                 )
+
+            log_message += ', train logit Deff(ent/PR): {:.3f}/{:.3f}'.format(
+                entry.get('train_logit_effdim_entropy', float('nan')),
+                entry.get('train_logit_effdim_pr', float('nan')),
+            )
+            log_message += ', test logit Deff(ent/PR): {:.3f}/{:.3f}'.format(
+                entry.get('test_logit_effdim_entropy', float('nan')),
+                entry.get('test_logit_effdim_pr', float('nan')),
+            )
 
             print(log_message)
             print_ckpt = next(print_ckpts)
@@ -313,6 +342,28 @@ parser.add_argument(
     type=int,
     default=1024,
     help='batch size used for RHM M_l diagnostics',
+)
+
+# Logit-cloud effective dimension diagnostics. These are always computed at
+# validation checkpoints, with deterministic train/test subsets to keep the
+# overhead bounded. Set max samples <= 0 to use the full split.
+parser.add_argument(
+    '--logit_effdim_max_train_samples',
+    type=int,
+    default=4096,
+    help='max train examples for logit effective-dimension diagnostics; set <=0 to use the full train split',
+)
+parser.add_argument(
+    '--logit_effdim_max_test_samples',
+    type=int,
+    default=4096,
+    help='max test examples for logit effective-dimension diagnostics; set <=0 to use the full test split',
+)
+parser.add_argument(
+    '--logit_effdim_batch_size',
+    type=int,
+    default=1024,
+    help='batch size used for logit effective-dimension diagnostics',
 )
 
 args = parser.parse_args()
