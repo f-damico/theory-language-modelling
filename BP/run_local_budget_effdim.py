@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
-from itertools import product
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -62,15 +62,72 @@ def dec2base_torch(values: torch.Tensor, base: int, length: int) -> torch.Tensor
     return out
 
 
+def _sample_unique_python_ints(population_size: int, k: int, rng: random.Random) -> List[int]:
+    """Sample k distinct integers from range(population_size) without materializing the range.
+
+    Python's random.sample(range(N), k) calls len(range(N)), which raises
+    OverflowError when N is larger than Py_ssize_t.  This helper keeps the
+    old exact path for ordinary N and uses rejection sampling for huge N.
+    The huge-N path is intended for the RHM regime used here, where k is tiny
+    compared with the implicit dataset size.
+    """
+    population_size = int(population_size)
+    k = int(k)
+    if k < 0:
+        raise ValueError("k must be nonnegative.")
+    if k > population_size:
+        raise ValueError(f"Cannot sample {k} distinct integers from population of size {population_size}.")
+    if k == 0:
+        return []
+
+    if population_size <= sys.maxsize:
+        return rng.sample(range(population_size), k)
+
+    # For very large implicit RHM datasets, k << population_size.
+    # This avoids both range-length overflow and any full-data enumeration.
+    seen = set()
+    out: List[int] = []
+    while len(out) < k:
+        x = rng.randrange(population_size)
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _int_to_base_digits(value: int, base: int, length: int) -> List[int]:
+    """Return exactly `length` base-`base` digits for a nonnegative Python int."""
+    value = int(value)
+    base = int(base)
+    length = int(length)
+    digits = [0] * length
+    for pos in range(length - 1, -1, -1):
+        digits[pos] = value % base
+        value //= base
+    if value != 0:
+        raise ValueError("Length is too small to represent the integer in the requested base.")
+    return digits
+
+
+def _sample_rule_tuples(v: int, s: int, k: int, rng: random.Random) -> np.ndarray:
+    """Sample k distinct s-tuples from {0,...,v-1}^s without building product(...)."""
+    tuple_ids = _sample_unique_python_ints(int(v) ** int(s), int(k), rng)
+    return np.asarray([_int_to_base_digits(idx, v, s) for idx in tuple_ids], dtype=np.int64)
+
+
 def sample_rules(v: int, n: int, m: int, s: int, L: int, seed: int = 42) -> List[np.ndarray]:
-    """Exact repo tree sampler, returned as numpy arrays for the BP code."""
-    random.seed(seed)
-    tuples = list(product(*[range(v) for _ in range(s)]))
-    rules_torch: List[torch.Tensor] = []
-    rules_torch.append(torch.tensor(random.sample(tuples, n * m)).reshape(n, m, -1))
+    """Exact repo tree sampler, returned as numpy arrays for the BP code.
+
+    The old implementation first built `list(product(range(v), repeat=s))`.
+    That is fine for v=16,s=2, but it is unnecessary and can explode for larger
+    alphabets/branching factors.  Here we sample only the needed rule tuples.
+    """
+    rng = random.Random(int(seed))
+    rules: List[np.ndarray] = []
+    rules.append(_sample_rule_tuples(v=v, s=s, k=n * m, rng=rng).reshape(n, m, s))
     for _ in range(1, L):
-        rules_torch.append(torch.tensor(random.sample(tuples, v * m)).reshape(v, m, -1))
-    return [r.cpu().numpy().astype(np.int64, copy=False) for r in rules_torch]
+        rules.append(_sample_rule_tuples(v=v, s=s, k=v * m, rng=rng).reshape(v, m, s))
+    return rules
 
 
 def _rules_numpy_to_torch(rules: Sequence[np.ndarray]) -> List[torch.Tensor]:
@@ -135,6 +192,61 @@ def sample_data_from_indices_torch(
         low_level = low_level % data_per_hl
 
     return features, labels
+
+
+def sample_data_from_indices_python_ints(
+    samples: Sequence[int],
+    rules: Sequence[np.ndarray],
+    n: int,
+    m: int,
+    s: int,
+    L: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Without-replacement RHM decoding for sample IDs that may exceed int64.
+
+    This is the same mixed-radix decoding used by `sample_data_from_indices_torch`,
+    but it works with Python integers and returns only the requested sequences.
+    It therefore avoids building the full RHM dataset and avoids torch int64
+    overflow when max_data = n * m ** ((s**L - 1)/(s - 1)) is enormous.
+    """
+    samples_list = [int(x) for x in samples]
+    max_data = int(n) * (int(m) ** ((int(s) ** int(L) - 1) // (int(s) - 1)))
+    data_per_hl0 = max_data // int(n)
+
+    out_features = np.empty((len(samples_list), int(s) ** int(L)), dtype=np.int64)
+    out_labels = np.empty(len(samples_list), dtype=np.int64)
+
+    rules_np = [np.asarray(r, dtype=np.int64) for r in rules]
+
+    for row, sample in enumerate(samples_list):
+        if sample < 0 or sample >= max_data:
+            raise ValueError(f"Sample id {sample} is outside [0, {max_data}).")
+
+        data_per_hl = data_per_hl0
+        label = sample // data_per_hl
+        low_level = sample % data_per_hl
+        features = [int(label)]
+        size = 1
+
+        for level in range(int(L)):
+            choices = int(m) ** size
+            data_per_hl //= choices
+            rule_choice_code = low_level // data_per_hl
+            rule_choices = _int_to_base_digits(rule_choice_code, int(m), size)
+
+            next_features: List[int] = []
+            level_rules = rules_np[level]
+            for parent_state, rule_idx in zip(features, rule_choices):
+                next_features.extend(int(x) for x in level_rules[parent_state, rule_idx])
+
+            features = next_features
+            size *= int(s)
+            low_level %= data_per_hl
+
+        out_labels[row] = int(label)
+        out_features[row, :] = np.asarray(features, dtype=np.int64)
+
+    return out_features, out_labels
 
 
 def build_rule_probabilities(
@@ -209,45 +321,94 @@ def build_train_test_dataset(
 
     if not replacement:
         if train_size == -1:
+            # Explicitly asking for the whole dataset is only feasible when the
+            # implicit RHM dataset fits both int64 indexing and memory.
+            if max_data > torch.iinfo(torch.int64).max:
+                raise ValueError(
+                    "train_size=-1 would enumerate the full RHM dataset, but max_data "
+                    f"is {max_data}, which exceeds int64. Use a finite train_size/test_size "
+                    "or set replacement=True."
+                )
             samples = torch.arange(max_data, dtype=torch.int64)
+            features_t, labels_t = sample_data_from_indices_torch(
+                samples=samples,
+                rules_torch=rules_torch,
+                n=num_classes,
+                m=num_synonyms,
+                s=tuple_size,
+                L=num_layers,
+            )
+            sequences = features_t.cpu().numpy().astype(np.int64, copy=False)
+            labels = labels_t.cpu().numpy().astype(np.int64, copy=False)
+            train_size_eff = int(max_data)
+            sample_ids = samples.cpu().numpy().astype(np.int64, copy=False)
         else:
-            test_size = min(test_size, max_data - train_size)
-            random.seed(seed_sample)
-            samples = torch.tensor(random.sample(range(max_data), train_size + test_size), dtype=torch.int64)
-        features_t, labels_t = sample_data_from_indices_torch(
-            samples=samples,
-            rules_torch=rules_torch,
-            n=num_classes,
-            m=num_synonyms,
-            s=tuple_size,
-            L=num_layers,
-        )
+            test_size = int(min(test_size, max_data - train_size))
+            total_size = int(train_size + test_size)
+            rng = random.Random(int(seed_sample))
+            sample_ids_list = _sample_unique_python_ints(max_data, total_size, rng)
+
+            if max_data <= torch.iinfo(torch.int64).max:
+                samples = torch.tensor(sample_ids_list, dtype=torch.int64)
+                features_t, labels_t = sample_data_from_indices_torch(
+                    samples=samples,
+                    rules_torch=rules_torch,
+                    n=num_classes,
+                    m=num_synonyms,
+                    s=tuple_size,
+                    L=num_layers,
+                )
+                sequences = features_t.cpu().numpy().astype(np.int64, copy=False)
+                labels = labels_t.cpu().numpy().astype(np.int64, copy=False)
+                sample_ids = np.asarray(sample_ids_list, dtype=np.int64)
+            else:
+                # L=5,s=2,m=4,n=16 already has max_data > sys.maxsize.
+                # Decode only the requested train+test sample IDs with Python
+                # integers; do not materialize the full dataset.
+                sequences, labels = sample_data_from_indices_python_ints(
+                    samples=sample_ids_list,
+                    rules=rules,
+                    n=num_classes,
+                    m=num_synonyms,
+                    s=tuple_size,
+                    L=num_layers,
+                )
+                sample_ids = np.asarray(sample_ids_list, dtype=object)
+            train_size_eff = int(train_size)
     else:
         torch.manual_seed(seed_sample)
         if train_size == -1:
-            total_size = max_data + test_size
+            if max_data > torch.iinfo(torch.int64).max:
+                raise ValueError(
+                    "train_size=-1 with replacement=True would request max_data + test_size "
+                    f"samples, but max_data is {max_data}. Use a finite train_size."
+                )
+            total_size = int(max_data + test_size)
+            train_size_eff = int(max_data)
         else:
-            total_size = train_size + test_size
-        labels = torch.randint(low=0, high=num_classes, size=(total_size,))
+            total_size = int(train_size + test_size)
+            train_size_eff = int(train_size)
+        labels_torch = torch.randint(low=0, high=num_classes, size=(total_size,))
         if zipf is None:
-            features_t, labels_t = sample_data_from_labels_torch(labels, rules_torch)
+            features_t, labels_t = sample_data_from_labels_torch(labels_torch, rules_torch)
         else:
             if layer is None:
                 raise ValueError('zipf law requires layer of application')
             prob = torch.from_numpy(_zipf_probabilities(num_synonyms, zipf))
-            features_t, labels_t = sample_data_from_labels_prob_torch(labels, rules_torch, int(layer), prob)
-
-    sequences = features_t.cpu().numpy().astype(np.int64, copy=False)
-    labels = labels_t.cpu().numpy().astype(np.int64, copy=False)
+            features_t, labels_t = sample_data_from_labels_prob_torch(labels_torch, rules_torch, int(layer), prob)
+        sequences = features_t.cpu().numpy().astype(np.int64, copy=False)
+        labels = labels_t.cpu().numpy().astype(np.int64, copy=False)
+        sample_ids = None
 
     return {
         'rules': rules,
         'rule_probs': rule_probs,
-        'train_sequences': sequences[:train_size],
-        'test_sequences': sequences[train_size: train_size + test_size],
-        'train_labels': labels[:train_size],
-        'test_labels': labels[train_size: train_size + test_size],
-        'max_data': max_data,
+        'sample_ids': sample_ids,
+        'train_sequences': sequences[:train_size_eff],
+        'test_sequences': sequences[train_size_eff: train_size_eff + test_size],
+        'train_labels': labels[:train_size_eff],
+        'test_labels': labels[train_size_eff: train_size_eff + test_size],
+        'max_data': int(max_data),
     }
 
 
@@ -644,6 +805,7 @@ def simulate_bp_lambda_sweep(
     layer: Optional[int] = None,
     replacement: Optional[bool] = None,
     last_layer_powerlaw_a: Optional[float] = None,
+    store_raw: bool = False,
 ) -> Dict[str, Any]:
     """
     Main notebook-friendly entry point.
@@ -717,6 +879,7 @@ def simulate_bp_lambda_sweep(
             'layer': None if layer is None else int(layer),
             'replacement': None if replacement is None else bool(replacement),
             'last_layer_powerlaw_a': None if last_layer_powerlaw_a is None else float(last_layer_powerlaw_a),
+            'store_raw': bool(store_raw),
         },
         'lambda_values': lambda_values,
         'loss_mean': np.array([r['loss_mean'] for r in sweep], dtype=np.float64),
@@ -757,13 +920,6 @@ def simulate_bp_lambda_sweep(
         'logit_cov_eigvals': np.stack([r['logit_cov_eigvals'] for r in sweep], axis=0),
         'residual_mean': np.array([r['residual_mean'] for r in sweep], dtype=np.float64),
         'reconstructed_loss_abs_error_mean': np.array([r['reconstructed_loss_abs_error_mean'] for r in sweep], dtype=np.float64),
-        'raw_per_lambda': sweep,
-        'rules': data['rules'],
-        'rule_probs': data['rule_probs'],
-        'train_sequences': data['train_sequences'],
-        'test_sequences': test_sequences,
-        'A_masks': hierarchy_masks['A_masks'],
-        'B_masks': hierarchy_masks['B_masks'],
         'note': (
             'lambda is the maximal L2 norm of the centered log-message carried by every internal BP message. '
             'If zipf and layer are set, the dataset is sampled with the exact repo replacement=True convention '
@@ -773,9 +929,23 @@ def simulate_bp_lambda_sweep(
             'R2 measures the fraction of centered posterior-logit energy explained by the nested block partition '
             '{B_1,...,B_l,A_l}; R_bar=(R2-R2_shuffled)/(1-R2_shuffled) uses the analytic shuffled baseline. '
             'The logit effective-dimension diagnostics are computed online from sum_z and sum_zz over test inputs, '
-            'so full logits are not saved.'
+            'so full logits are not saved. Raw rules/sequences/masks/raw_per_lambda are omitted by default; '
+            'pass store_raw=True or --store_raw if you explicitly need them.'
         ),
     }
+
+    if store_raw:
+        results.update({
+            'raw_per_lambda': sweep,
+            'rules': data['rules'],
+            'rule_probs': data['rule_probs'],
+            'sample_ids': data.get('sample_ids'),
+            'train_sequences': data['train_sequences'],
+            'test_sequences': test_sequences,
+            'A_masks': hierarchy_masks['A_masks'],
+            'B_masks': hierarchy_masks['B_masks'],
+        })
+
     return results
 
 
@@ -788,7 +958,7 @@ def plot_loss_vs_lambda(results: Dict[str, Any], ax: Optional[plt.Axes] = None) 
     if pos.size > 0:
         ax.set_xscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
         ax.set_yscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
-    ax.set_xlabel('message budget $\lambda$')
+    ax.set_xlabel(r'message budget $\lambda$')
     ax.set_ylabel('test loss')
     ax.set_title('Local-budget BP: loss')
     ax.grid(True, which='both', alpha=0.3)
@@ -804,7 +974,7 @@ def plot_error_vs_lambda(results: Dict[str, Any], ax: Optional[plt.Axes] = None)
     if pos.size > 0:
         ax.set_xscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
         ax.set_yscale('symlog', linthresh=max(float(np.min(pos)) / 2.0, 1e-6))
-    ax.set_xlabel('message budget $\lambda$')
+    ax.set_xlabel(r'message budget $\lambda$')
     ax.set_ylabel('test error')
     ax.set_title('Local-budget BP: error')
     ax.grid(True, which='both', alpha=0.3)
@@ -834,10 +1004,10 @@ def plot_hierarchy_observables(
 
     fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
     metrics = [
-        (A_mass, 'Mean mass on $A_\ell$', 'mass on $A_\ell$'),
-        (margin, 'Mean level margin $M_\ell$', '$M_\ell$'),
-        (margin_pos, 'Fraction with $M_\ell>0$', 'fraction'),
-        (hier_acc, 'Hierarchical accuracy', 'Pr[argmax q \in A_l]'),
+        (A_mass, r'Mean mass on $A_\ell$', r'mass on $A_\ell$'),
+        (margin, r'Mean level margin $M_\ell$', r'$M_\ell$'),
+        (margin_pos, r'Fraction with $M_\ell>0$', 'fraction'),
+        (hier_acc, 'Hierarchical accuracy', r'Pr[argmax q \in A_l]'),
     ]
 
     pos = x[x > 0]
@@ -850,8 +1020,8 @@ def plot_hierarchy_observables(
         ax.set_ylabel(ylabel)
         ax.grid(True, which='both', alpha=0.3)
 
-    axs[1, 0].set_xlabel('message budget $\lambda$')
-    axs[1, 1].set_xlabel('message budget $\lambda$')
+    axs[1, 0].set_xlabel(r'message budget $\lambda$')
+    axs[1, 1].set_xlabel(r'message budget $\lambda$')
     handles, labels = axs[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', ncol=n_levels, frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -892,8 +1062,8 @@ def plot_logit_geometry_observables(
         ax.set_ylabel(ylabel)
         ax.grid(True, which='both', alpha=0.3)
 
-    axs[1, 0].set_xlabel('message budget $\lambda$')
-    axs[1, 1].set_xlabel('message budget $\lambda$')
+    axs[1, 0].set_xlabel(r'message budget $\lambda$')
+    axs[1, 1].set_xlabel(r'message budget $\lambda$')
     handles, labels = axs[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', ncol=n_levels, frameon=False)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -950,7 +1120,7 @@ def plot_logit_effective_dimension(
 
     for ax in axs:
         ax.set_xscale('symlog', linthresh=linthresh)
-        ax.set_xlabel('message budget $\lambda$')
+        ax.set_xlabel(r'message budget $\lambda$')
         ax.grid(True, which='both', alpha=0.3)
 
     fig.tight_layout()
@@ -994,6 +1164,8 @@ def main() -> None:
     parser.add_argument('--include_zero', action='store_true')
     parser.add_argument('--out_prefix', type=str, default='/mnt/data/constrained_bp_rhm_zipf_exact')
     parser.add_argument('--no_plots', action='store_true')
+    parser.add_argument('--store_raw', action='store_true',
+                        help='Store raw rules/sequences/masks/raw_per_lambda in the returned dict. Default is off to keep saved objects small.')
     args = parser.parse_args()
 
     lambda_values = _parse_lambda_values(args)
@@ -1012,6 +1184,7 @@ def main() -> None:
         zipf=args.zipf,
         layer=args.layer,
         replacement=args.replacement if args.replacement else None,
+        store_raw=args.store_raw,
     )
 
     out_prefix = Path(args.out_prefix)

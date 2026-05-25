@@ -74,6 +74,35 @@ def sample_data_from_rules(samples, rules, n, m, s, L):
     return features, labels
 
 
+def sample_data_from_labels(labels, rules, m, L):
+    """
+    Create RHM data by ancestral sampling with replacement.
+
+    This avoids encoding each possible tree realisation as a single int64 sample id,
+    which overflows for deep hierarchies such as L=5, s=2, m=4.
+
+    Args:
+        labels: root labels, tensor of shape [N].
+        rules: dictionary of production rules, ordered top-to-bottom.
+        m: number of synonymic production rules per parent.
+        L: number of hierarchy levels.
+
+    Returns:
+        features: terminal token sequences of shape [N, s**L].
+        labels: root labels of shape [N].
+    """
+    features = labels.long().reshape(-1, 1)
+    for l in range(L):
+        chosen_rule = torch.randint(
+            low=0,
+            high=m,
+            size=features.shape,
+            device=features.device,
+        )
+        features = rules[l][features, chosen_rule].flatten(start_dim=1)
+    return features, labels.long()
+
+
 class RandomHierarchyModel(Dataset):
     """
     Random Hierarchy Model dataset.
@@ -103,6 +132,7 @@ class RandomHierarchyModel(Dataset):
         test_size=0,
         input_format='onehot',
         whitening=0,
+        replacement=None,
         transform=None,
     ):
         self.num_features = num_features
@@ -124,27 +154,55 @@ class RandomHierarchyModel(Dataset):
         self.rules = rules
 
         max_data = num_classes * num_synonyms ** ((tuple_size ** num_layers - 1) // (tuple_size - 1))
-        assert max_data < 1e19, (
-            "dataset size cannot be represented with int64!! Parameters too large! "
-            "Please open a github issue if you need a solution."
-        )
 
-        if train_size == -1:
-            samples = torch.arange(max_data)
+        # Original behaviour: sample without replacement by encoding each full
+        # derivation tree as one int64 integer.  For deep hierarchies this
+        # integer can exceed the int64 range even when the requested train/test
+        # split is modest.  In that case we switch to ordinary ancestral
+        # sampling with replacement, which is the natural i.i.d. RHM sampling
+        # convention and avoids the overflow.
+        int64_safe = max_data < 1e19
+        if replacement is None:
+            replacement = not int64_safe
+
+        if train_size == -1 and replacement:
+            raise ValueError(
+                "train_size=-1 asks to enumerate the full dataset, but replacement=True "
+                "uses generative i.i.d. sampling. Please set an explicit train_size."
+            )
+
+        if not replacement:
+            assert int64_safe, (
+                "dataset size cannot be represented with int64!! Parameters too large! "
+                "Use replacement=True / generative sampling for this parameter regime."
+            )
+            if train_size == -1:
+                samples = torch.arange(max_data)
+            else:
+                test_size = min(test_size, max_data - train_size)
+                random.seed(seed_sample)
+                samples = torch.tensor(random.sample(range(max_data), train_size + test_size))
+            self.sample_ids = samples.clone()
+
+            raw_features, raw_labels = sample_data_from_rules(
+                samples,
+                rules,
+                num_classes,
+                num_synonyms,
+                tuple_size,
+                num_layers,
+            )
         else:
-            test_size = min(test_size, max_data - train_size)
-            random.seed(seed_sample)
-            samples = torch.tensor(random.sample(range(max_data), train_size + test_size))
-        self.sample_ids = samples.clone()
-
-        raw_features, raw_labels = sample_data_from_rules(
-            samples,
-            rules,
-            num_classes,
-            num_synonyms,
-            tuple_size,
-            num_layers,
-        )
+            total_size = train_size + test_size
+            torch.manual_seed(seed_sample)
+            labels = torch.randint(low=0, high=num_classes, size=(total_size,))
+            self.sample_ids = torch.arange(total_size)
+            raw_features, raw_labels = sample_data_from_labels(
+                labels,
+                rules,
+                num_synonyms,
+                num_layers,
+            )
 
         # Full terminal sequence and root labels, kept unchanged for diagnostics.
         self.rhm_sequences = raw_features.clone().long()

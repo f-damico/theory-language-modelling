@@ -36,17 +36,50 @@ class _TransformerNormMixin:
     def _norm_from_weight_iterable(self, weights, *, device, dtype_out) -> torch.Tensor:
         weights = list(weights)
         if len(weights) == 0:
-            return torch.tensor(0.0, device=device, dtype=dtype_out)
+            return torch.tensor(0.0, device=device, dtype=torch.float64)
 
         specs = [self._spectral_norm(weight) for weight in weights]
         two1s = [self._two_one_norm_transpose(weight) for weight in weights]
 
-        prod_spec = torch.prod(torch.stack(specs))
+        specs = torch.stack(specs).to(torch.float64)
+        two1s = torch.stack(two1s).to(torch.float64)
+
+        eps = torch.tensor(1e-300, dtype=torch.float64, device=device)
+
+        prod_spec = torch.prod(specs)
+
         correction = torch.stack([
             (t ** (2.0 / 3.0)) / (s ** (2.0 / 3.0) + 1e-12)
             for t, s in zip(two1s, specs)
         ]).sum()
-        return (prod_spec * (correction ** 1.5)).to(dtype=dtype_out)
+
+        norm_value = prod_spec * (correction ** 1.5)
+
+        # Important: do NOT cast back to float32.
+        return norm_value
+
+    @torch.no_grad()
+    def compute_model_log_norm(self) -> torch.Tensor:
+        params = list(self.parameters())
+        if len(params) == 0:
+            return torch.tensor(float("-inf"))
+    
+        device = params[0].device
+        weights = list(self._all_weight_matrices())
+    
+        specs = torch.stack([self._spectral_norm(w) for w in weights]).to(torch.float64)
+        two1s = torch.stack([self._two_one_norm_transpose(w) for w in weights]).to(torch.float64)
+    
+        eps = torch.tensor(1e-300, dtype=torch.float64, device=device)
+    
+        log_prod_spec = torch.log(specs.clamp_min(eps)).sum()
+    
+        correction_terms = (two1s.clamp_min(eps) ** (2.0 / 3.0)) / (
+            specs.clamp_min(eps) ** (2.0 / 3.0) + 1e-12
+        )
+        log_correction = torch.log(correction_terms.sum().clamp_min(eps))
+    
+        return log_prod_spec + 1.5 * log_correction
 
     @torch.no_grad()
     def compute_model_norm(self) -> torch.Tensor:

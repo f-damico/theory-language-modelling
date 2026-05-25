@@ -2,8 +2,8 @@
 #PBS -N rhm_transformer
 #PBS -q gpuq-longrun
 #PBS -J 0-8
-#PBS -l select=1:ncpus=4:ngpus=1:mem=8gb
-#PBS -l walltime=100:00:00
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb
+#PBS -l walltime=1000:00:00
 #PBS -j oe
 #PBS -o pbs_logs/
 
@@ -33,20 +33,20 @@ SEED_SAMPLE="${SEED_SAMPLE:-0}"
 SEED_MODEL="${SEED_MODEL:-0}"
 
 ##############################################
-NUM_FEATURES="${NUM_FEATURES:-32}"
-NUM_CLASSES="${NUM_CLASSES:-32}"
+NUM_FEATURES="${NUM_FEATURES:-16}"
+NUM_CLASSES="${NUM_CLASSES:-16}"
 NUM_SYNONYMS="${NUM_SYNONYMS:-4}"
 TUPLE_SIZE="${TUPLE_SIZE:-2}"
-NUM_LAYERS="${NUM_LAYERS:-4}"
-NUM_TOKENS="${NUM_TOKENS:-16}"
+NUM_LAYERS="${NUM_LAYERS:-5}"
+NUM_TOKENS="${NUM_TOKENS:-32}"
 
-DEPTH="${DEPTH:-4}"
+DEPTH="${DEPTH:-5}"
 
 ##############################################
 
 # Transformer training defaults.
 TEST_SIZE="${TEST_SIZE:-32768}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
+BATCH_SIZE="${BATCH_SIZE:-256}"               ############### <----------------------------------- QUI
 ACCUMULATION="${ACCUMULATION:-0}"
 SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
@@ -57,7 +57,7 @@ OPTIM="${OPTIM:-adam}"
 SCHEDULER="${SCHEDULER:-warmup}"
 SCHEDULER_TIME="${SCHEDULER_TIME:-10}"
 PRINT_FREQ="${PRINT_FREQ:-1}"
-SAVE_FREQ="${SAVE_FREQ:-25}"
+SAVE_FREQ="${SAVE_FREQ:-5}"
 LOSS_THRESHOLD="${LOSS_THRESHOLD:-1e-3}"
 
 # Dataset switch kept from your convolutional PBS.
@@ -86,6 +86,7 @@ TRAIN_SIZES=(
   131072
   524288
   2097152
+  8388608
 )
 
 ARRAY_INDEX="${PBS_ARRAY_INDEX:-0}"

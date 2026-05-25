@@ -106,7 +106,13 @@ def get_norm_measures(model):
             value = value.detach().item()
         out['l2norm'] = float(value)
 
-    return out
+    if hasattr(model, 'compute_model_log_norm'):
+        value = model.compute_model_log_norm()
+        if torch.is_tensor(value):
+            value = value.detach().item()
+        out['log_specnorm'] = float(value)
+
+        return out
 
 
 # -----------------------------------------------------------------------------

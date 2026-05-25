@@ -15,9 +15,13 @@ IGNORE_COMPARE_KEYS = {
     "run_name",
     "data_root",
     "train_size",
-    "save_trainstep_epochs",   # only changes extra saving/logging, not the base experiment
+    "batch_size",              # can differ across jobs; warn but still collect
+    "save_freq",               # only changes checkpoint/write cadence; warn but still collect
+    "save_trainstep_epochs",
     *SEED_KEYS,
 }
+
+WARNING_ONLY_COMPARE_KEYS = ("batch_size", "save_freq")
 
 SPECTRAL_KEY = "specnorm"
 L2_KEY = "l2norm"
@@ -271,6 +275,30 @@ def comparable_params(args_dict):
     return {k: v for k, v in args_dict.items() if k not in IGNORE_COMPARE_KEYS}
 
 
+def _warn_if_warning_only_params_differ(entries):
+    """Print a non-fatal warning for parameters that are allowed to differ."""
+    for key in WARNING_ONLY_COMPARE_KEYS:
+        values_to_paths = {}
+        for e in entries:
+            value_repr = repr(e["args"].get(key, None))
+            values_to_paths.setdefault(value_repr, []).append(e["path"])
+
+        if len(values_to_paths) <= 1:
+            continue
+
+        print(
+            f"[WARNING] Different values of {key!r} found across result files. "
+            "This is allowed and aggregation will continue, but runs were not "
+            "produced with exactly the same batch size."
+        )
+        for value_repr, paths in sorted(values_to_paths.items()):
+            example = paths[0]
+            print(
+                f"[WARNING]   {key}={value_repr}: {len(paths)} file(s); "
+                f"example: {example}"
+            )
+
+
 def nanmean_std_with_flag(x, axis):
     valid = ~np.isnan(x)
     counts = valid.sum(axis=axis)
@@ -436,13 +464,18 @@ def main():
 
         entries.append(entry)
 
-    # Check that all non-seed, non-train_size params are identical.
+    # Check that all non-seed, non-train_size, warning-only params are identical.
+    # In particular, batch_size is allowed to differ: it changes optimization
+    # details, but the collector can still aggregate the files on the same grids.
+    _warn_if_warning_only_params_differ(entries)
+
     ref = entries[0]["params_compare"]
     for e in entries[1:]:
         if e["params_compare"] != ref:
             raise ValueError(
                 "Files in this run folder do not belong to one single experiment family.\n"
-                "At least one non-seed/non-train_size hyperparameter differs.\n"
+                "At least one non-seed/non-train_size/non-warning-only hyperparameter differs.\n"
+                f"Warning-only keys: {WARNING_ONLY_COMPARE_KEYS}\n"
                 f"Reference params:\n{ref}\n\nDifferent params:\n{e['params_compare']}\n\n"
                 f"Problematic file: {e['path']}"
             )
