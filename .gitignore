@@ -16,6 +16,7 @@ ENV/
 # Cluster / run logs
 # =========================
 pbs_logs/
+data/
 logs/
 *.log
 *.out

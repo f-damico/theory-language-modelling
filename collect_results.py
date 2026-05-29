@@ -18,6 +18,12 @@ IGNORE_COMPARE_KEYS = {
     "batch_size",              # can differ across jobs; warn but still collect
     "save_freq",               # only changes checkpoint/write cadence; warn but still collect
     "save_trainstep_epochs",
+    "weight_save_every",        # only changes extra checkpoint artifacts
+    "save_run_data",
+    "save_processed_dataset_inputs",
+    "save_data_subset_train_size",
+    "save_data_subset_test_size",
+    "save_data_subset_seed",
     *SEED_KEYS,
 }
 
@@ -421,9 +427,12 @@ def main():
     experiment_name = args.experiment_name or args.run_name
     save_path = results_dir / f"{experiment_name}.npy"
 
-    files = sorted(run_dir.glob("*.pkl"))
+    # New runs are stored as one subfolder per run, with the old-style metrics
+    # .pkl inside that folder.  Keep compatibility with the old flat layout by
+    # searching recursively.  Checkpoints are .pt files, so they are ignored here.
+    files = sorted(run_dir.rglob("*.pkl"))
     if len(files) == 0:
-        raise FileNotFoundError(f"No .pkl files found in {run_dir}")
+        raise FileNotFoundError(f"No .pkl files found recursively in {run_dir}")
 
     entries = []
     for path in files:

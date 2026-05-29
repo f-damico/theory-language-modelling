@@ -1,0 +1,58 @@
+#!/bin/bash
+#PBS -N bp_diffusion_local
+#PBS -q gpuq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+
+echo "[INFO] host=$(hostname)"
+echo "[INFO] workdir=$(pwd)"
+echo "[INFO] date=$(date)"
+
+# Optional environment setup. Override these at qsub time if needed:
+#   qsub -v CONDA_ENV_NAME=rhm,RUN_NAME=test run_bp_diffusion_local.pbs
+if command -v module >/dev/null 2>&1; then
+  module load anaconda 2>/dev/null || true
+fi
+
+if [ -n "${CONDA_ENV_NAME:-}" ]; then
+  source "$(conda info --base)/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV_NAME"
+fi
+
+PYTHON_BIN="${PYTHON_BIN:-python}"
+DEVICE="${DEVICE:-cuda}"
+RUN_NAME="${RUN_NAME:-bp_diffusion_local}"
+OUT_DIR="${OUT_DIR:-./data/BP}"
+mkdir -p "$OUT_DIR"
+
+$PYTHON_BIN constrained_bp_diffusion_local.py \
+  --num_features "${NUM_FEATURES:-16}" \
+  --num_classes "${NUM_CLASSES:-16}" \
+  --num_synonyms "${NUM_SYNONYMS:-4}" \
+  --tuple_size "${TUPLE_SIZE:-2}" \
+  --num_layers "${NUM_LAYERS:-3}" \
+  --train_size "${TRAIN_SIZE:-1024}" \
+  --test_size "${TEST_SIZE:-1024}" \
+  --seed_rules "${SEED_RULES:-0}" \
+  --seed_sample "${SEED_SAMPLE:-0}" \
+  --seed_noise "${SEED_NOISE:-0}" \
+  --mask_prob_values "${MASK_PROB_VALUES:-1.0}" \
+  --num_corruptions_per_sequence "${NUM_CORRUPTIONS_PER_SEQUENCE:-1}" \
+  --target_mode "${TARGET_MODE:-masked_only}" \
+  --margin_context "${MARGIN_CONTEXT:-clean}" \
+  --lambda_log10_min "${LAMBDA_LOG10_MIN:--2}" \
+  --lambda_log10_max "${LAMBDA_LOG10_MAX:-1.5}" \
+  --lambda_num "${LAMBDA_NUM:-20}" \
+  ${INCLUDE_ZERO:---include_zero} \
+  ${INCLUDE_INF:---include_inf} \
+  --batch_size "${BATCH_SIZE:-128}" \
+  --device "$DEVICE" \
+  --dtype "${DTYPE:-float64}" \
+  --out_prefix "$OUT_DIR/$RUN_NAME"
+
+echo "[INFO] done date=$(date)"

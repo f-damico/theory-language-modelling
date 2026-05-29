@@ -1,0 +1,88 @@
+#!/bin/bash
+#PBS -N bp_d3pm_local
+#PBS -q gpuq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=24gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$PWD}"
+
+echo "[INFO] host=$(hostname)"
+echo "[INFO] workdir=$(pwd)"
+echo "[INFO] date=$(date)"
+
+# Optional environment setup. Override at qsub time, e.g.
+#   qsub -v CONDA_ENV_NAME=rhm,RUN_NAME=bp_d3pm_L3 run_bp_d3pm_local.pbs
+if command -v module >/dev/null 2>&1; then
+  module load anaconda 2>/dev/null || true
+fi
+
+if [ -n "${CONDA_ENV_NAME:-}" ]; then
+  source "$(conda info --base)/etc/profile.d/conda.sh"
+  conda activate "$CONDA_ENV_NAME"
+fi
+
+PYTHON_BIN="${PYTHON_BIN:-python}"
+DEVICE="${DEVICE:-cuda}"
+RUN_NAME="${RUN_NAME:-bp_d3pm_local}"
+OUT_DIR="${OUT_DIR:-./data/BP}"
+mkdir -p "$OUT_DIR"
+
+GEN_FLAGS=""
+if [ "${COMPUTE_GENERATION:-1}" = "1" ] || [ "${COMPUTE_GENERATION:-true}" = "true" ]; then
+  GEN_FLAGS="$GEN_FLAGS --compute_generation"
+else
+  GEN_FLAGS="$GEN_FLAGS --no_compute_generation"
+fi
+if [ "${SAVE_GENERATED_SAMPLES:-0}" = "1" ] || [ "${SAVE_GENERATED_SAMPLES:-false}" = "true" ]; then
+  GEN_FLAGS="$GEN_FLAGS --save_generated_samples"
+fi
+if [ "${SAVE_GENERATED_TRAJECTORY:-0}" = "1" ] || [ "${SAVE_GENERATED_TRAJECTORY:-false}" = "true" ]; then
+  GEN_FLAGS="$GEN_FLAGS --save_generated_trajectory"
+fi
+
+SCRIPT_PATH="${SCRIPT_PATH:-diffusion/constrained_bp_d3pm_local.py}"
+if [ ! -f "$SCRIPT_PATH" ]; then
+  SCRIPT_PATH="constrained_bp_d3pm_local.py"
+fi
+if [ ! -f "$SCRIPT_PATH" ]; then
+  echo "[ERROR] Cannot find constrained_bp_d3pm_local.py. Set SCRIPT_PATH=/path/to/constrained_bp_d3pm_local.py" >&2
+  exit 2
+fi
+
+echo "[INFO] script=$SCRIPT_PATH"
+
+$PYTHON_BIN "$SCRIPT_PATH" \
+  --num_features "${NUM_FEATURES:-16}" \
+  --num_classes "${NUM_CLASSES:-16}" \
+  --num_synonyms "${NUM_SYNONYMS:-4}" \
+  --tuple_size "${TUPLE_SIZE:-2}" \
+  --num_layers "${NUM_LAYERS:-3}" \
+  --train_size "${TRAIN_SIZE:-1024}" \
+  --test_size "${TEST_SIZE:-1024}" \
+  --seed_rules "${SEED_RULES:-0}" \
+  --seed_sample "${SEED_SAMPLE:-0}" \
+  --seed_noise "${SEED_NOISE:-0}" \
+  --diffusion_steps "${DIFFUSION_STEPS:-100}" \
+  --beta_start "${BETA_START:-0.0001}" \
+  --beta_end "${BETA_END:-0.02}" \
+  --beta_schedule "${BETA_SCHEDULE:-linear}" \
+  --num_time_samples_per_sequence "${NUM_TIME_SAMPLES_PER_SEQUENCE:-1}" \
+  --margin_context "${MARGIN_CONTEXT:-clean}" \
+  --lambda_log10_min "${LAMBDA_LOG10_MIN:--2}" \
+  --lambda_log10_max "${LAMBDA_LOG10_MAX:-2}" \
+  --lambda_num "${LAMBDA_NUM:-25}" \
+  ${INCLUDE_ZERO:---include_zero} \
+  ${INCLUDE_INF:---include_inf} \
+  --batch_size "${BATCH_SIZE:-128}" \
+  $GEN_FLAGS \
+  --num_generated "${NUM_GENERATED:-1024}" \
+  --generation_batch_size "${GENERATION_BATCH_SIZE:-${BATCH_SIZE:-128}}" \
+  --generation_seed "${GENERATION_SEED:-123}" \
+  --device "$DEVICE" \
+  --dtype "${DTYPE:-float64}" \
+  --out_prefix "$OUT_DIR/$RUN_NAME"
+
+echo "[INFO] done date=$(date)"

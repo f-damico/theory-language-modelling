@@ -64,6 +64,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--save_trainstep_epochs', type=int, default=None,
                         help='If > 0, save measures after every optimizer update during the first N epochs.')
 
+    # Run-folder checkpoint/data saving.
+    parser.add_argument('--weight_save_every', type=str, default='1',
+                        help='save a resume-ready checkpoint every N epochs; use none to disable')
+    parser.add_argument('--save_run_data', type=int, default=1,
+                        help='if 1, save compact full train/test data in each run folder')
+    parser.add_argument('--save_processed_dataset_inputs', type=int, default=0,
+                        help='if 1, also save processed model inputs; can be very large')
+    parser.add_argument('--save_data_subset_train_size', type=int, default=1024,
+                        help='number of train examples in reference subset; -1 means full train split')
+    parser.add_argument('--save_data_subset_test_size', type=int, default=1024,
+                        help='number of test examples in reference subset; -1 means full test split')
+    parser.add_argument('--save_data_subset_seed', type=int, default=-1,
+                        help='seed for reference subset; -1 reuses seed_sample')
+
     # Seeds and runtime.
     parser.add_argument('--seed_rules', type=int, default=0)
     parser.add_argument('--seed_sample', type=int, default=0)
@@ -82,9 +96,10 @@ def main() -> None:
     embedding_dim = args.embedding_dim or (args.num_heads * args.num_features)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    outname = args.output_dir / (
-        f'{args.tag}_P{args.train_size}_sr{args.seed_rules}_ss{args.seed_sample}_sm{args.seed_model}.pkl'
-    )
+    run_id = f'{args.tag}_P{args.train_size}_sr{args.seed_rules}_ss{args.seed_sample}_sm{args.seed_model}'
+    run_dir = args.output_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outname = run_dir / f'{run_id}.pkl'
 
     cmd = [
         args.python_bin,
@@ -122,6 +137,12 @@ def main() -> None:
         '--save_freq', str(args.save_freq),
         '--loss_threshold', str(args.loss_threshold),
         '--outname', str(outname),
+        '--weight_save_every', str(args.weight_save_every),
+        '--save_run_data', str(args.save_run_data),
+        '--save_processed_dataset_inputs', str(args.save_processed_dataset_inputs),
+        '--save_data_subset_train_size', str(args.save_data_subset_train_size),
+        '--save_data_subset_test_size', str(args.save_data_subset_test_size),
+        '--save_data_subset_seed', str(args.save_data_subset_seed),
     ]
 
     if args.compute_margin_stats:
@@ -147,9 +168,14 @@ def main() -> None:
     print('[INFO] Running one RHM transformer training')
     print(f'[INFO] repo_dir={args.repo_dir}')
     print(f'[INFO] output_dir={args.output_dir}')
+    print(f'[INFO] run_dir={run_dir}')
     print(f'[INFO] outname={outname}')
     print(f'[INFO] batch_size={args.batch_size}')
     print(f'[INFO] compute_rhm_margins={args.compute_rhm_margins}')
+    print(f'[INFO] weight_save_every={args.weight_save_every}')
+    print(f'[INFO] save_run_data={args.save_run_data}')
+    print(f'[INFO] save_data_subset_train_size={args.save_data_subset_train_size}')
+    print(f'[INFO] save_data_subset_test_size={args.save_data_subset_test_size}')
     print('[CMD] ' + ' '.join(cmd))
 
     env = dict(**os.environ)
