@@ -1,0 +1,177 @@
+#!/bin/bash
+#PBS -N rep_overlap
+#PBS -q gpuq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=8:00:00
+#PBS -j oe
+#PBS -o pbs_logs/
+
+set -eo pipefail
+
+REPO_DIR="${PBS_O_WORKDIR:-$PWD}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-rhm}"
+DEVICE="${DEVICE:-cuda}"
+
+SCRIPT="${SCRIPT:-$REPO_DIR/compute_representation_overlaps.py}"
+DATA_ROOT="${DATA_ROOT:-$REPO_DIR/data}"
+RESULTS_ROOT="${RESULTS_ROOT:-$REPO_DIR/results}"
+
+# Pass either RUN_DIR directly, or RUN_NAME plus optional RUN_ID.
+RUN_DIR="${RUN_DIR:-}"
+RUN_NAME="${RUN_NAME:-}"
+RUN_ID="${RUN_ID:-}"
+
+OUTPUT_NAME="${OUTPUT_NAME:-representation_overlap_run}"
+NUM_SAVINGS="${NUM_SAVINGS:-10}"
+MAX_EPOCH="${MAX_EPOCH:-256}"
+
+SUBSET_TRAIN_SIZE="${SUBSET_TRAIN_SIZE:-1024}"
+SUBSET_TEST_SIZE="${SUBSET_TEST_SIZE:-1024}"
+SUBSET_SEED="${SUBSET_SEED:-}"
+REP_BATCH_SIZE="${REP_BATCH_SIZE:-256}"
+REPRESENTATION_MODE="${REPRESENTATION_MODE:-mean_pool}"
+MAX_GRAM_ROWS="${MAX_GRAM_ROWS:-1048576}"
+FORCE_MASK_LAST="${FORCE_MASK_LAST:-1}"
+INCLUDE_FINAL_NORM="${INCLUDE_FINAL_NORM:-1}"
+
+mkdir -p "$REPO_DIR/pbs_logs"
+cd "$REPO_DIR"
+
+JOB_ID="${PBS_JOBID:-no_jobid}"
+LOG_FILE="$REPO_DIR/pbs_logs/rep_overlap_${JOB_ID}_${OUTPUT_NAME}.log"
+
+if command -v module >/dev/null 2>&1; then
+    module purge || true
+fi
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export MKL_INTERFACE_LAYER="${MKL_INTERFACE_LAYER:-GNU}"
+
+if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+else
+    source activate "$CONDA_ENV_NAME"
+fi
+
+set -u
+
+ORIG_CVD="${CUDA_VISIBLE_DEVICES:-unset}"
+if [[ "${ORIG_CVD}" == GPU-* ]]; then
+    GPU_INDEX_FROM_UUID="$($PYTHON_BIN - <<'PY'
+import os, subprocess
+uuid = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+out = subprocess.check_output(
+    ['nvidia-smi', '--query-gpu=index,uuid', '--format=csv,noheader'],
+    text=True,
+)
+for line in out.splitlines():
+    idx, full_uuid = [x.strip() for x in line.split(',')]
+    if full_uuid == uuid or full_uuid.startswith(uuid):
+        print(idx)
+        break
+PY
+)"
+    if [ -n "$GPU_INDEX_FROM_UUID" ]; then
+        export CUDA_VISIBLE_DEVICES="$GPU_INDEX_FROM_UUID"
+    fi
+fi
+
+{
+    echo "[START] $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[INFO] hostname=$(hostname)"
+    echo "[INFO] repo_dir=$REPO_DIR"
+    echo "[INFO] script=$SCRIPT"
+    echo "[INFO] data_root=$DATA_ROOT"
+    echo "[INFO] run_dir=${RUN_DIR:-None}"
+    echo "[INFO] run_name=${RUN_NAME:-None}"
+    echo "[INFO] run_id=${RUN_ID:-None}"
+    echo "[INFO] results_root=$RESULTS_ROOT"
+    echo "[INFO] output_name=$OUTPUT_NAME"
+    echo "[INFO] num_savings=$NUM_SAVINGS"
+    echo "[INFO] max_epoch=${MAX_EPOCH:-None}"
+    echo "[INFO] subset_train_size=$SUBSET_TRAIN_SIZE"
+    echo "[INFO] subset_test_size=$SUBSET_TEST_SIZE"
+    echo "[INFO] subset_seed=${SUBSET_SEED:-checkpoint_seed_sample}"
+    echo "[INFO] rep_batch_size=$REP_BATCH_SIZE"
+    echo "[INFO] representation_mode=$REPRESENTATION_MODE"
+    echo "[INFO] max_gram_rows=$MAX_GRAM_ROWS"
+    echo "[INFO] force_mask_last=$FORCE_MASK_LAST"
+    echo "[INFO] include_final_norm=$INCLUDE_FINAL_NORM"
+    echo "[INFO] conda_env_name=$CONDA_ENV_NAME"
+    echo "[INFO] python_bin=$PYTHON_BIN"
+    echo "[INFO] which_python=$(command -v "$PYTHON_BIN" || true)"
+    echo "[INFO] python_version=$($PYTHON_BIN --version 2>&1 || true)"
+    echo "[INFO] orig_cuda_visible_devices=$ORIG_CVD"
+    echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-unset}"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi || true
+    fi
+} | tee -a "$LOG_FILE"
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "[ERROR] Missing script: $SCRIPT" | tee -a "$LOG_FILE"
+    exit 1
+fi
+
+CMD=(
+    "$PYTHON_BIN" -u "$SCRIPT"
+    --repo_dir "$REPO_DIR"
+    --data_root "$DATA_ROOT"
+    --results_root "$RESULTS_ROOT"
+    --output_name "$OUTPUT_NAME"
+    --num_savings "$NUM_SAVINGS"
+    --subset_train_size "$SUBSET_TRAIN_SIZE"
+    --subset_test_size "$SUBSET_TEST_SIZE"
+    --batch_size "$REP_BATCH_SIZE"
+    --device "$DEVICE"
+    --representation_mode "$REPRESENTATION_MODE"
+    --max_gram_rows "$MAX_GRAM_ROWS"
+)
+
+if [ -n "$RUN_DIR" ]; then
+    CMD+=(--run_dir "$RUN_DIR")
+else
+    if [ -z "$RUN_NAME" ]; then
+        echo "[ERROR] Set either RUN_DIR or RUN_NAME." | tee -a "$LOG_FILE"
+        exit 1
+    fi
+    CMD+=(--run_name "$RUN_NAME")
+    if [ -n "$RUN_ID" ]; then
+        CMD+=(--run_id "$RUN_ID")
+    fi
+fi
+
+if [ -n "$MAX_EPOCH" ]; then
+    CMD+=(--max_epoch "$MAX_EPOCH")
+fi
+
+if [ -n "$SUBSET_SEED" ]; then
+    CMD+=(--subset_seed "$SUBSET_SEED")
+fi
+
+case "${FORCE_MASK_LAST,,}" in
+    1|true|yes|y) CMD+=(--force_mask_last) ;;
+    0|false|no|n) CMD+=(--no_force_mask_last) ;;
+    *) echo "[ERROR] Invalid FORCE_MASK_LAST=$FORCE_MASK_LAST" | tee -a "$LOG_FILE"; exit 1 ;;
+esac
+
+case "${INCLUDE_FINAL_NORM,,}" in
+    1|true|yes|y) CMD+=(--include_final_norm) ;;
+    0|false|no|n) CMD+=(--no_include_final_norm) ;;
+    *) echo "[ERROR] Invalid INCLUDE_FINAL_NORM=$INCLUDE_FINAL_NORM" | tee -a "$LOG_FILE"; exit 1 ;;
+esac
+
+{
+    echo "[CMD] ${CMD[*]}"
+    echo "[RUN] representation overlap analysis"
+} | tee -a "$LOG_FILE"
+
+"${CMD[@]}" 2>&1 | tee -a "$LOG_FILE"
+RET=$?
+
+echo "[END] $(date '+%Y-%m-%d %H:%M:%S') return_code=$RET" | tee -a "$LOG_FILE"
+exit $RET

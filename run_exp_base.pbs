@@ -33,14 +33,14 @@ SEED_SAMPLE="${SEED_SAMPLE:-0}"
 SEED_MODEL="${SEED_MODEL:-0}"
 
 ##############################################
-NUM_FEATURES="${NUM_FEATURES:-16}"
-NUM_CLASSES="${NUM_CLASSES:-16}"
-NUM_SYNONYMS="${NUM_SYNONYMS:-4}"
+NUM_FEATURES="${NUM_FEATURES:-32}"
+NUM_CLASSES="${NUM_CLASSES:-32}"
+NUM_SYNONYMS="${NUM_SYNONYMS:-8}"
 TUPLE_SIZE="${TUPLE_SIZE:-2}"
-NUM_LAYERS="${NUM_LAYERS:-5}"
-NUM_TOKENS="${NUM_TOKENS:-32}"
+NUM_LAYERS="${NUM_LAYERS:-3}"
+NUM_TOKENS="${NUM_TOKENS:-8}"
 
-DEPTH="${DEPTH:-10}"
+DEPTH="${DEPTH:-6}"
 
 ##############################################
 
@@ -50,7 +50,7 @@ BATCH_SIZE="${BATCH_SIZE:-256}"               ############### <-----------------
 ACCUMULATION="${ACCUMULATION:-0}"
 SAVE_TRAINSTEP_EPOCHS="${SAVE_TRAINSTEP_EPOCHS:-}"
 INIT_SCALE="${INIT_SCALE:-0.8}"
-MAX_EPOCHS="${MAX_EPOCHS:-2048}"
+MAX_EPOCHS="${MAX_EPOCHS:-256}"
 LR="${LR:-0.0005}"
 # These are fixed inside run_rhm_transformer_single.py/main.py for transformers.
 OPTIM="${OPTIM:-adam}"
